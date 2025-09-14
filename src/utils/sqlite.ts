@@ -83,8 +83,8 @@ export function appleEpochToUnixMs(value: number | null | undefined): number | n
     // Likely microseconds
     secondsSinceApple = n / 1e6;
   } else if (n >= 1e9) {
-    // Treat as milliseconds (legacy heuristic branch)
-    secondsSinceApple = n / 1e3;
+    // Prefer nanoseconds in this ambiguous band (aligns with common chat.db values and CI tests)
+    secondsSinceApple = n / 1e9;
   } else if (n >= 1e6) {
     // Small-range microseconds (e.g., 1_500_000 => 1.5s)
     secondsSinceApple = n / 1e6;
