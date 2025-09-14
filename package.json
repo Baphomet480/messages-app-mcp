@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "ts-node src/index.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "vitest run --coverage"
   },
   "keywords": [],
   "author": "",
@@ -21,7 +22,9 @@
   },
   "devDependencies": {
     "@types/node": "^24.3.3",
+    "@vitest/coverage-v8": "^3.2.4",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
   }
 }
