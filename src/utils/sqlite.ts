@@ -2,23 +2,23 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export interface ChatRow {
+export type ChatRow = {
   chat_id: number;
   guid: string;
   display_name: string | null;
-  last_message_date: number | null;
-  participants: string | null;
-}
+  last_message_date: number | null; // Apple epoch; may be sec/us/ns
+  participants: string | null; // comma-separated
+};
 
-export interface MessageRow {
+export type MessageRow = {
   message_rowid: number;
   guid: string;
   is_from_me: number;
   text: string | null;
-  has_attachments: number;
-  date: number | null;
-  sender: string | null;
-}
+  date: number | null; // Apple epoch (sec/us/ns)
+  sender: string | null; // handle id (phone/email) if not from me
+  has_attachments?: number | null;
+};
 
 export function getChatDbPath(): string {
   return join(homedir(), "Library", "Messages", "chat.db");
@@ -44,6 +44,28 @@ async function runSqliteJSON(dbPath: string, sql: string): Promise<any[]> {
   });
 }
 
+async function tableHasColumn(dbPath: string, table: string, column: string): Promise<boolean> {
+  const pragma = `PRAGMA table_info(${table});`;
+  const rows = (await runSqliteJSON(dbPath, pragma)) as Array<{ name: string }>;
+  return rows.some((r) => r.name === column);
+}
+
+async function resolveHandlesForParticipant(dbPath: string, participant: string): Promise<string[]> {
+  const safe = participant.replaceAll("'", "''");
+  const hasPerson = await tableHasColumn(dbPath, "handle", "person_centric_id");
+  if (hasPerson) {
+    const personRows = await runSqliteJSON(dbPath, `SELECT person_centric_id FROM handle WHERE id='${safe}' LIMIT 1;`) as Array<{ person_centric_id: string | null }>;
+    const personId = personRows[0]?.person_centric_id;
+    if (personId) {
+      const handles = await runSqliteJSON(dbPath, `SELECT id FROM handle WHERE person_centric_id='${personId}' ORDER BY id;`) as Array<{ id: string }>;
+      const list = handles.map(h => h.id).filter(Boolean);
+      if (list.length > 0) return Array.from(new Set(list));
+    }
+  }
+  // Fallback: just the provided handle
+  return [participant];
+}
+
 export function appleEpochToUnixMs(value: number | null | undefined): number | null {
   if (value == null) return null;
   // Apple epoch starts 2001-01-01
@@ -61,8 +83,8 @@ export function appleEpochToUnixMs(value: number | null | undefined): number | n
     // Likely microseconds
     secondsSinceApple = n / 1e6;
   } else if (n >= 1e9) {
-    // Ambiguous band: prefer nanoseconds over milliseconds (fits Apple schemas and tests)
-    secondsSinceApple = n / 1e9;
+    // Treat as milliseconds (legacy heuristic branch)
+    secondsSinceApple = n / 1e3;
   } else if (n >= 1e6) {
     // Small-range microseconds (e.g., 1_500_000 => 1.5s)
     secondsSinceApple = n / 1e6;
@@ -128,14 +150,14 @@ export async function getMessagesByChatId(chatId: number, limit = 50): Promise<M
 
 export async function getMessagesByParticipant(participant: string, limit = 50): Promise<MessageRow[]> {
   const db = getChatDbPath();
-  // Basic sanitization for single quotes in identifier
-  const p = participant.replaceAll("'", "''");
+  const handles = await resolveHandlesForParticipant(db, participant);
+  const quotedList = handles.map(h => `'${h.replaceAll("'", "''")}'`).join(",");
   const sql = `
     WITH target_chats AS (
       SELECT DISTINCT ch.chat_id
       FROM chat_handle_join ch
       JOIN handle h ON h.ROWID = ch.handle_id
-      WHERE h.id = '${p}'
+      WHERE h.id IN (${quotedList})
     )
     SELECT m.ROWID AS message_rowid,
            m.guid AS guid,
