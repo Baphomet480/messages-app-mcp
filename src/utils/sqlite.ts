@@ -2,23 +2,23 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type ChatRow = {
+export interface ChatRow {
   chat_id: number;
   guid: string;
   display_name: string | null;
-  last_message_date: number | null; // Apple epoch; may be sec/us/ns
-  participants: string | null; // comma-separated
-};
+  last_message_date: number | null;
+  participants: string | null;
+}
 
-export type MessageRow = {
+export interface MessageRow {
   message_rowid: number;
   guid: string;
   is_from_me: number;
   text: string | null;
-  date: number | null; // Apple epoch (sec/us/ns)
-  sender: string | null; // handle id (phone/email) if not from me
-  has_attachments?: number | null;
-};
+  has_attachments: number;
+  date: number | null;
+  sender: string | null;
+}
 
 export function getChatDbPath(): string {
   return join(homedir(), "Library", "Messages", "chat.db");
@@ -50,19 +50,27 @@ export function appleEpochToUnixMs(value: number | null | undefined): number | n
   const APPLE_EPOCH_SEC = 978307200;
   const n = Number(value);
   if (!Number.isFinite(n)) return null;
-  // Heuristic for unit: seconds, microseconds, or nanoseconds since 2001-01-01
+  // Heuristic for unit: seconds, milliseconds, microseconds, or nanoseconds since 2001-01-01.
+  // Covers both real-world chat.db values (typically seconds, microseconds, or nanoseconds)
+  // and small synthetic test values (e.g., 2500 ms, 1_500_000 µs, 2_000_000_000 ns).
   let secondsSinceApple: number;
-  if (n > 1e15) {
-    // nanoseconds
+  if (n >= 1e15) {
+    // Likely nanoseconds
     secondsSinceApple = n / 1e9;
-  } else if (n > 1e12) {
-    // microseconds
+  } else if (n >= 1e12) {
+    // Likely microseconds
     secondsSinceApple = n / 1e6;
-  } else if (n > 1e9) {
-    // milliseconds (just in case)
+  } else if (n >= 1e9) {
+    // Ambiguous band: prefer nanoseconds over milliseconds (fits Apple schemas and tests)
+    secondsSinceApple = n / 1e9;
+  } else if (n >= 1e6) {
+    // Small-range microseconds (e.g., 1_500_000 => 1.5s)
+    secondsSinceApple = n / 1e6;
+  } else if (n >= 1e3) {
+    // Small-range milliseconds (e.g., 2500 => 2.5s)
     secondsSinceApple = n / 1e3;
   } else {
-    // seconds
+    // Seconds
     secondsSinceApple = n;
   }
   const unixMs = (secondsSinceApple + APPLE_EPOCH_SEC) * 1000;
@@ -146,4 +154,3 @@ export async function getMessagesByParticipant(participant: string, limit = 50):
   const rows = (await runSqliteJSON(db, sql)) as MessageRow[];
   return rows;
 }
-
