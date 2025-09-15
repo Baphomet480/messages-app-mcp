@@ -25,6 +25,9 @@
 - Add a `npm test` script in PRs; aim to cover edge cases (timestamp conversion, SQL limits, error paths).
 
 ## Commit & Pull Request Guidelines
+
+- Maintainer prefers the agent manages git operations (commits, pushes, branches, merges) proactively—including pushing to `origin/main`—without additional prompts unless explicitly told otherwise.
+- Agent should check available MCP tools (e.g., web search, Context7) whenever they would help with research or testing.
 - Commits: concise, present tense; prefer Conventional Commits (e.g., `feat:`, `fix:`, `docs:`).
 - PRs must include: purpose, key changes, local run notes, and linked issue(s). Keep diffs focused.
 - Pre‑merge checklist: `npm run build` passes; tools tested (or testing plan noted); no unintended file changes.
