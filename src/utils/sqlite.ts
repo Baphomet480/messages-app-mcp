@@ -9,6 +9,7 @@ export type ChatRow = {
   display_name: string | null;
   last_message_date: number | null; // Apple epoch; may be sec/us/ns
   participants: string | null; // comma-separated
+  unread_count?: number | null;
 };
 
 export type MessageRow = {
@@ -19,10 +20,38 @@ export type MessageRow = {
   date: number | null; // Apple epoch (sec/us/ns)
   sender: string | null; // handle id (phone/email) if not from me
   has_attachments?: number | null;
+  service?: string | null;
+  account?: string | null;
+  subject?: string | null;
+  associated_message_type?: number | null;
+  associated_message_guid?: string | null;
+  expressive_send_style_id?: string | null;
+  balloon_bundle_id?: string | null;
+  thread_originator_guid?: string | null;
+  reply_to_guid?: string | null;
+  item_type?: number | null;
+  message_type_raw?: number | null;
 };
 
 export type SearchMessageRow = MessageRow & {
   chat_id: number;
+};
+
+export type EnrichedMessageRow = MessageRow & {
+  body_hex?: string | null;
+  decoded_text?: string | null;
+  attachments_meta?: { name: string; mime: string; filename: string }[];
+};
+
+export type AttachmentInfo = {
+  message_rowid: number;
+  attachment_rowid: number;
+  filename: string | null;
+  resolved_path: string | null;
+  mime_type: string | null;
+  transfer_name: string | null;
+  total_bytes: number | null;
+  created_unix_ms: number | null;
 };
 
 export function getChatDbPath(): string {
@@ -49,8 +78,12 @@ async function runSqliteJSON(dbPath: string, sql: string): Promise<any[]> {
   });
 }
 
+const attributedBodyCache = new Map<string, string | null>();
+
 async function decodeAttributedBodyHexToText(hex: string): Promise<string | null> {
   if (!hex) return null;
+  const cached = attributedBodyCache.get(hex);
+  if (cached !== undefined) return cached;
   try {
     const buf = Buffer.from(hex, 'hex');
     const dir = await fs.mkdtemp(join(tmpdir(), 'msgmcp-'));
@@ -81,10 +114,67 @@ async function decodeAttributedBodyHexToText(hex: string): Promise<string | null
     // Pick the longest reasonable string as message text
     const sorted = strings.sort((a,b) => b.length - a.length);
     const candidate = sorted[0] || null;
+    attributedBodyCache.set(hex, candidate);
     return candidate;
   } catch {
+    attributedBodyCache.set(hex, null);
     return null;
   }
+}
+
+type MessageColumnSupport = {
+  hasAccount: boolean;
+  hasAssociatedMessageType: boolean;
+  hasAssociatedMessageGuid: boolean;
+  hasAttributedBody: boolean;
+  hasBalloonBundleId: boolean;
+  hasExpressiveSendStyleId: boolean;
+  hasItemType: boolean;
+  hasMessageTypeRaw: boolean;
+  hasReplyToGuid: boolean;
+  hasService: boolean;
+  hasSubject: boolean;
+  hasThreadOriginatorGuid: boolean;
+};
+
+let cachedMessageColumnSupport: MessageColumnSupport | null = null;
+
+async function getMessageColumnSupport(dbPath: string): Promise<MessageColumnSupport> {
+  if (cachedMessageColumnSupport) return cachedMessageColumnSupport;
+  const pragma = await runSqliteJSON(dbPath, "PRAGMA table_info(message);") as Array<{ name: string }>;
+  const names = new Set(pragma.map((row) => row.name));
+  cachedMessageColumnSupport = {
+    hasAccount: names.has("account"),
+    hasAssociatedMessageType: names.has("associated_message_type"),
+    hasAssociatedMessageGuid: names.has("associated_message_guid"),
+    hasAttributedBody: names.has("attributedBody"),
+    hasBalloonBundleId: names.has("balloon_bundle_id"),
+    hasExpressiveSendStyleId: names.has("expressive_send_style_id"),
+    hasItemType: names.has("item_type"),
+    hasMessageTypeRaw: names.has("type"),
+    hasReplyToGuid: names.has("reply_to_guid"),
+    hasService: names.has("service"),
+    hasSubject: names.has("subject"),
+    hasThreadOriginatorGuid: names.has("thread_originator_guid"),
+  };
+  return cachedMessageColumnSupport;
+}
+
+export function resolveAttachmentPath(filename: string | null): string | null {
+  if (!filename) return null;
+  if (filename.startsWith("~/")) {
+    return join(homedir(), filename.slice(2));
+  }
+  if (filename === "~") {
+    return homedir();
+  }
+  if (filename.startsWith("~")) {
+    return join(homedir(), filename.slice(1));
+  }
+  if (filename.startsWith("/")) {
+    return filename;
+  }
+  return join(homedir(), filename);
 }
 
 async function tableHasColumn(dbPath: string, table: string, column: string): Promise<boolean> {
@@ -161,8 +251,107 @@ function unixMsToAppleRaw(unixMs: number, scale: number): number {
   return Math.floor(secondsSinceApple * scale);
 }
 
-export async function listChats(limit = 50): Promise<ChatRow[]> {
+type MessageSelectOptions = {
+  includeChatId?: boolean;
+  includeAttachmentsMeta?: boolean;
+};
+
+async function buildMessageSelect(dbPath: string, options: MessageSelectOptions = {}): Promise<string> {
+  const support = await getMessageColumnSupport(dbPath);
+  const parts: string[] = [
+    "m.ROWID AS message_rowid",
+    "m.guid AS guid",
+    "m.is_from_me AS is_from_me",
+    "m.text AS text",
+    "m.cache_has_attachments AS has_attachments",
+    "m.date AS date",
+  ];
+  if (support.hasService) parts.push("m.service AS service");
+  if (support.hasAccount) parts.push("m.account AS account");
+  if (support.hasSubject) parts.push("m.subject AS subject");
+  if (support.hasAssociatedMessageType) parts.push("m.associated_message_type AS associated_message_type");
+  if (support.hasAssociatedMessageGuid) parts.push("m.associated_message_guid AS associated_message_guid");
+  if (support.hasExpressiveSendStyleId) parts.push("m.expressive_send_style_id AS expressive_send_style_id");
+  if (support.hasBalloonBundleId) parts.push("m.balloon_bundle_id AS balloon_bundle_id");
+  if (support.hasThreadOriginatorGuid) parts.push("m.thread_originator_guid AS thread_originator_guid");
+  if (support.hasReplyToGuid) parts.push("m.reply_to_guid AS reply_to_guid");
+  if (support.hasItemType) parts.push("m.item_type AS item_type");
+  if (support.hasMessageTypeRaw) parts.push("m.type AS message_type_raw");
+  if (support.hasAttributedBody) parts.push("HEX(m.attributedBody) AS body_hex");
+  parts.push("h.id AS sender");
+  if (options.includeChatId) parts.push("cmj.chat_id AS chat_id");
+  if (options.includeAttachmentsMeta) {
+    parts.push(`(
+        SELECT GROUP_CONCAT(COALESCE(a.transfer_name, a.filename) || '|' || COALESCE(a.mime_type,'') || '|' || COALESCE(a.filename,''), '§')
+        FROM message_attachment_join maj JOIN attachment a ON a.ROWID = maj.attachment_id
+        WHERE maj.message_id = m.ROWID
+      ) AS atts_concat`);
+  }
+  return parts.join(",\n           ");
+}
+
+function parseAttachmentConcat(value: string | null | undefined, cap = 5): { name: string; mime: string; filename: string }[] {
+  if (!value) return [];
+  const out: { name: string; mime: string; filename: string }[] = [];
+  for (const part of value.split('§')) {
+    if (!part) continue;
+    const [name, mime, filename] = part.split('|');
+    out.push({
+      name: name || "",
+      mime: mime || "",
+      filename: filename ? filename.split(/[\\/]/).pop() || filename : "",
+    });
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
+async function hydrateDecodedText(rows: Array<{ text: string | null; body_hex?: string | null; decoded_text?: string | null }>): Promise<void> {
+  const tasks: Array<Promise<void>> = [];
+  for (const row of rows) {
+    if (row.text && row.text.trim().length > 0) continue;
+    if (!row.body_hex) continue;
+    tasks.push((async () => {
+      const decoded = await decodeAttributedBodyHexToText(row.body_hex!);
+      if (decoded && decoded.trim().length > 0) {
+        row.decoded_text = decoded;
+      }
+    })());
+  }
+  if (tasks.length) {
+    await Promise.allSettled(tasks);
+  }
+}
+
+export type ListChatsOptions = {
+  participant?: string;
+  updatedAfterUnixMs?: number;
+  unreadOnly?: boolean;
+};
+
+export async function listChats(limit = 50, options: ListChatsOptions = {}): Promise<ChatRow[]> {
   const db = getChatDbPath();
+  const filters: string[] = [];
+  if (options.unreadOnly) {
+    filters.push("COALESCE(c.unread_count, 0) > 0");
+  }
+  if (options.participant) {
+    const handles = await resolveHandlesForParticipant(db, options.participant);
+    const quoted = handles.map((h) => `'${h.replaceAll("'", "''")}'`).join(",");
+    filters.push(`c.ROWID IN (
+      SELECT DISTINCT ch.chat_id
+      FROM chat_handle_join ch
+      JOIN handle h ON h.ROWID = ch.handle_id
+      WHERE h.id IN (${quoted})
+    )`);
+  }
+  let afterSql = "";
+  if (options.updatedAfterUnixMs != null) {
+    const scale = await detectAppleDateScale(db);
+    const raw = unixMsToAppleRaw(options.updatedAfterUnixMs, scale);
+    afterSql = `WHERE lm.last_message_date IS NOT NULL AND lm.last_message_date >= ${raw}`;
+  }
+  const whereClause = filters.length ? `${afterSql ? `${afterSql} AND ` : "WHERE "}${filters.join(" AND ")}` : afterSql;
   const sql = `
     WITH last_msg AS (
       SELECT cmj.chat_id, MAX(m.date) AS last_message_date
@@ -173,6 +362,7 @@ export async function listChats(limit = 50): Promise<ChatRow[]> {
     SELECT c.ROWID AS chat_id,
            c.guid AS guid,
            c.display_name AS display_name,
+           c.unread_count AS unread_count,
            lm.last_message_date AS last_message_date,
            (
              SELECT GROUP_CONCAT(DISTINCT h.id)
@@ -182,6 +372,7 @@ export async function listChats(limit = 50): Promise<ChatRow[]> {
            ) AS participants
     FROM chat c
     LEFT JOIN last_msg lm ON lm.chat_id = c.ROWID
+    ${whereClause}
     ORDER BY lm.last_message_date DESC NULLS LAST
     LIMIT ${Math.max(1, Math.min(500, limit))};`;
 
@@ -191,14 +382,9 @@ export async function listChats(limit = 50): Promise<ChatRow[]> {
 
 export async function getMessagesByChatId(chatId: number, limit = 50): Promise<MessageRow[]> {
   const db = getChatDbPath();
+  const select = await buildMessageSelect(db);
   const sql = `
-    SELECT m.ROWID AS message_rowid,
-           m.guid AS guid,
-           m.is_from_me AS is_from_me,
-           m.text AS text,
-           m.cache_has_attachments AS has_attachments,
-           m.date AS date,
-           h.id AS sender
+    SELECT ${select}
     FROM chat_message_join cmj
     JOIN message m ON m.ROWID = cmj.message_id
     LEFT JOIN handle h ON h.ROWID = m.handle_id
@@ -206,7 +392,8 @@ export async function getMessagesByChatId(chatId: number, limit = 50): Promise<M
     ORDER BY m.date DESC
     LIMIT ${Math.max(1, Math.min(500, limit))};`;
 
-  const rows = (await runSqliteJSON(db, sql)) as MessageRow[];
+  const rows = (await runSqliteJSON(db, sql)) as EnrichedMessageRow[];
+  await hydrateDecodedText(rows);
   return rows;
 }
 
@@ -214,6 +401,7 @@ export async function getMessagesByParticipant(participant: string, limit = 50):
   const db = getChatDbPath();
   const handles = await resolveHandlesForParticipant(db, participant);
   const quotedList = handles.map(h => `'${h.replaceAll("'", "''")}'`).join(",");
+  const select = await buildMessageSelect(db);
   const sql = `
     WITH target_chats AS (
       SELECT DISTINCT ch.chat_id
@@ -221,13 +409,7 @@ export async function getMessagesByParticipant(participant: string, limit = 50):
       JOIN handle h ON h.ROWID = ch.handle_id
       WHERE h.id IN (${quotedList})
     )
-    SELECT m.ROWID AS message_rowid,
-           m.guid AS guid,
-           m.is_from_me AS is_from_me,
-           m.text AS text,
-           m.cache_has_attachments AS has_attachments,
-           m.date AS date,
-           h.id AS sender
+    SELECT ${select}
     FROM chat_message_join cmj
     JOIN message m ON m.ROWID = cmj.message_id
     LEFT JOIN handle h ON h.ROWID = m.handle_id
@@ -235,7 +417,8 @@ export async function getMessagesByParticipant(participant: string, limit = 50):
     ORDER BY m.date DESC
     LIMIT ${Math.max(1, Math.min(500, limit))};`;
 
-  const rows = (await runSqliteJSON(db, sql)) as MessageRow[];
+  const rows = (await runSqliteJSON(db, sql)) as EnrichedMessageRow[];
+  await hydrateDecodedText(rows);
   return rows;
 }
 
@@ -249,14 +432,18 @@ export type SearchOptions = {
   hasAttachments?: boolean; // cache_has_attachments > 0
   limit?: number;
   offset?: number;
+  includeAttachmentsMeta?: boolean;
 };
 
-export async function searchMessages(opts: SearchOptions): Promise<SearchMessageRow[]> {
+export async function searchMessages(opts: SearchOptions): Promise<(SearchMessageRow & { attachments?: { name: string; mime: string }[] })[]> {
   const db = getChatDbPath();
   const limit = Math.max(1, Math.min(500, opts.limit ?? 50));
   const offset = Math.max(0, opts.offset ?? 0);
   const q = (opts.query || "").trim();
   const safeQ = q.replaceAll("'", "''");
+  if (opts.chatId == null && !opts.participant && opts.fromUnixMs == null && opts.toUnixMs == null) {
+    throw new Error("Search requires at least one scope filter (chatId, participant, or from/to unix).");
+  }
   const filters: string[] = [];
   // Only text search on plain text column; attributedBody is a blob and not decoded here.
   if (safeQ) {
@@ -299,15 +486,9 @@ export async function searchMessages(opts: SearchOptions): Promise<SearchMessage
   }
 
   const where = ["1=1", ...filters].join(" AND ");
+  const select = await buildMessageSelect(db, { includeChatId: true, includeAttachmentsMeta: !!opts.includeAttachmentsMeta });
   const sql = `
-    SELECT m.ROWID AS message_rowid,
-           cmj.chat_id AS chat_id,
-           m.guid AS guid,
-           m.is_from_me AS is_from_me,
-           m.text AS text,
-           m.cache_has_attachments AS has_attachments,
-           m.date AS date,
-           h.id AS sender
+    SELECT ${select}
     FROM chat_message_join cmj
     JOIN message m ON m.ROWID = cmj.message_id
     LEFT JOIN handle h ON h.ROWID = m.handle_id
@@ -317,55 +498,56 @@ export async function searchMessages(opts: SearchOptions): Promise<SearchMessage
     ORDER BY m.date DESC
     LIMIT ${limit} OFFSET ${offset};`;
 
-  const rows = (await runSqliteJSON(db, sql)) as SearchMessageRow[];
+  const rows = (await runSqliteJSON(db, sql)) as (EnrichedMessageRow & { chat_id: number; atts_concat?: string | null })[];
+  await hydrateDecodedText(rows);
+  if (opts.includeAttachmentsMeta) {
+    for (const r of rows) {
+      if ((r as any).atts_concat) {
+        r.attachments_meta = parseAttachmentConcat((r as any).atts_concat, 5);
+      }
+      delete (r as any).atts_concat;
+    }
+  }
 
   // If we did not reach limit and a query exists, try attributedBody within the same scope
+  const seenIds = new Set(rows.map((r) => r.message_rowid));
   if (rows.length < limit && safeQ) {
     const need = limit - rows.length;
-    const richSql = `
-      SELECT m.ROWID AS message_rowid,
-             cmj.chat_id AS chat_id,
-             m.guid AS guid,
-             m.is_from_me AS is_from_me,
-             m.text AS text,
-             m.cache_has_attachments AS has_attachments,
-             m.date AS date,
-             h.id AS sender,
-             hex(m.attributedBody) AS body_hex
-      FROM chat_message_join cmj
-      JOIN message m ON m.ROWID = cmj.message_id
-      LEFT JOIN handle h ON h.ROWID = m.handle_id
-      WHERE m.attributedBody IS NOT NULL
-        ${scopeSQL}
-        ${dateSQL}
-      ORDER BY m.date DESC
-      LIMIT ${Math.min(500, need * 10)} OFFSET 0;`;
-    const richRows = await runSqliteJSON(db, richSql) as Array<SearchMessageRow & { body_hex: string | null }>;
-    for (const r of richRows) {
-      if (!r.body_hex) continue;
-      const t = await decodeAttributedBodyHexToText(r.body_hex);
-      if (!t) continue;
-      if (t.toLowerCase().includes(safeQ.toLowerCase())) {
-        // Attach decoded text so caller can use it
-        (r as any).decoded_text = t;
+    const support = await getMessageColumnSupport(db);
+    if (support.hasAttributedBody) {
+      const richSql = `
+        SELECT ${select}
+        FROM chat_message_join cmj
+        JOIN message m ON m.ROWID = cmj.message_id
+        LEFT JOIN handle h ON h.ROWID = m.handle_id
+        WHERE m.attributedBody IS NOT NULL
+          ${scopeSQL}
+          ${dateSQL}
+        ORDER BY m.date DESC
+        LIMIT ${Math.min(500, need * 10)} OFFSET 0;`;
+      const richRows = await runSqliteJSON(db, richSql) as (EnrichedMessageRow & { chat_id: number; body_hex?: string | null; atts_concat?: string | null })[];
+      await hydrateDecodedText(richRows);
+      const matches: (SearchMessageRow & { decoded_text?: string | null; attachments_meta?: { name: string; mime: string; filename: string }[] })[] = [];
+      for (const r of richRows) {
+        const decoded = (r as any).decoded_text;
+        if (!decoded) continue;
+        if (!decoded.toLowerCase().includes(safeQ.toLowerCase())) continue;
+        if (opts.includeAttachmentsMeta && (r as any).atts_concat) {
+          r.attachments_meta = parseAttachmentConcat((r as any).atts_concat, 5);
+        }
+        delete (r as any).atts_concat;
+        if (seenIds.has(r.message_rowid)) continue;
+        seenIds.add(r.message_rowid);
+        matches.push(r as any);
+        if (matches.length >= need) break;
       }
+      return [...rows, ...matches];
     }
-    const richMatches = richRows.filter((r: any) => r.decoded_text).slice(0, need).map((r: any) => ({
-      message_rowid: r.message_rowid,
-      chat_id: r.chat_id,
-      guid: r.guid,
-      is_from_me: r.is_from_me,
-      text: r.decoded_text as string,
-      has_attachments: r.has_attachments,
-      date: r.date,
-      sender: r.sender,
-    })) as SearchMessageRow[];
-    return [...rows, ...richMatches];
   }
   return rows;
 }
 
-export async function contextAroundMessage(messageRowId: number, before = 10, after = 10): Promise<MessageRow[]> {
+export async function contextAroundMessage(messageRowId: number, before = 10, after = 10, includeAttachmentsMeta = false): Promise<(MessageRow & { attachments?: { name: string; mime: string }[] })[]> {
   const db = getChatDbPath();
   const id = Math.floor(messageRowId);
   // Find chat and timestamp for the anchor message
@@ -377,49 +559,91 @@ export async function contextAroundMessage(messageRowId: number, before = 10, af
   const chatId = meta[0]?.chat_id;
   const date = meta[0]?.date;
   if (chatId == null || date == null) return [];
+  const select = await buildMessageSelect(db, { includeAttachmentsMeta, includeChatId: true });
   const prev = await runSqliteJSON(db, `
-    SELECT m.ROWID AS message_rowid,
-           m.guid AS guid,
-           m.is_from_me AS is_from_me,
-           m.text AS text,
-           m.cache_has_attachments AS has_attachments,
-           m.date AS date,
-           h.id AS sender
+    SELECT ${select}
     FROM chat_message_join cmj
     JOIN message m ON m.ROWID = cmj.message_id
     LEFT JOIN handle h ON h.ROWID = m.handle_id
     WHERE cmj.chat_id = ${chatId} AND m.date < ${date}
     ORDER BY m.date DESC
-    LIMIT ${Math.max(0, before)};`) as MessageRow[];
+    LIMIT ${Math.max(0, before)};`) as (EnrichedMessageRow & { chat_id: number; atts_concat?: string | null })[];
   const cur = await runSqliteJSON(db, `
-    SELECT m.ROWID AS message_rowid,
-           m.guid AS guid,
-           m.is_from_me AS is_from_me,
-           m.text AS text,
-           m.cache_has_attachments AS has_attachments,
-           m.date AS date,
-           h.id AS sender
+    SELECT ${select}
     FROM chat_message_join cmj
     JOIN message m ON m.ROWID = cmj.message_id
     LEFT JOIN handle h ON h.ROWID = m.handle_id
     WHERE cmj.chat_id = ${chatId} AND m.ROWID = ${id}
-    LIMIT 1;`) as MessageRow[];
+    LIMIT 1;`) as (EnrichedMessageRow & { chat_id: number; atts_concat?: string | null })[];
   const nxt = await runSqliteJSON(db, `
-    SELECT m.ROWID AS message_rowid,
-           m.guid AS guid,
-           m.is_from_me AS is_from_me,
-           m.text AS text,
-           m.cache_has_attachments AS has_attachments,
-           m.date AS date,
-           h.id AS sender
+    SELECT ${select}
     FROM chat_message_join cmj
     JOIN message m ON m.ROWID = cmj.message_id
     LEFT JOIN handle h ON h.ROWID = m.handle_id
     WHERE cmj.chat_id = ${chatId} AND m.date > ${date}
     ORDER BY m.date ASC
-    LIMIT ${Math.max(0, after)};`) as MessageRow[];
-  // Return ordered by date asc: prev (asc) + cur + next
-  const prevAsc = [...prev].sort((a,b) => (appleEpochToUnixMs(a.date) ?? 0) - (appleEpochToUnixMs(b.date) ?? 0));
-  const out = [...prevAsc, ...cur, ...nxt];
-  return out;
+    LIMIT ${Math.max(0, after)};`) as (EnrichedMessageRow & { chat_id: number; atts_concat?: string | null })[];
+  const combined = [...prev, ...cur, ...nxt];
+  await hydrateDecodedText(combined);
+  if (includeAttachmentsMeta) {
+    for (const row of combined) {
+      if ((row as any).atts_concat) {
+        row.attachments_meta = parseAttachmentConcat((row as any).atts_concat, 5);
+      }
+      delete (row as any).atts_concat;
+    }
+  }
+  combined.sort((a, b) => (appleEpochToUnixMs(a.date) ?? 0) - (appleEpochToUnixMs(b.date) ?? 0));
+  return combined as any;
+}
+
+export async function getAttachmentsForMessages(messageIds: number[], perMessageCap = 5): Promise<AttachmentInfo[]> {
+  const sanitized = Array.from(new Set(messageIds.map((id) => Math.floor(id)).filter((id) => Number.isFinite(id) && id > 0)));
+  if (!sanitized.length) return [];
+  const cap = Math.max(1, Math.min(25, perMessageCap));
+  const db = getChatDbPath();
+  const idsCsv = sanitized.join(",");
+  const sql = `
+    WITH ranked AS (
+      SELECT maj.message_id AS message_rowid,
+             a.ROWID AS attachment_rowid,
+             a.filename AS filename,
+             a.transfer_name AS transfer_name,
+             a.mime_type AS mime_type,
+             a.total_bytes AS total_bytes,
+             a.created_date AS created_date_raw,
+             ROW_NUMBER() OVER (PARTITION BY maj.message_id ORDER BY a.created_date DESC, a.ROWID DESC) AS rn
+      FROM message_attachment_join maj
+      JOIN attachment a ON a.ROWID = maj.attachment_id
+      WHERE maj.message_id IN (${idsCsv})
+    )
+    SELECT message_rowid,
+           attachment_rowid,
+           filename,
+           transfer_name,
+           mime_type,
+           total_bytes,
+           created_date_raw
+    FROM ranked
+    WHERE rn <= ${cap}
+    ORDER BY message_rowid, rn;`;
+  const rows = await runSqliteJSON(db, sql) as Array<{
+    message_rowid: number;
+    attachment_rowid: number;
+    filename: string | null;
+    transfer_name: string | null;
+    mime_type: string | null;
+    total_bytes: number | null;
+    created_date_raw: number | null;
+  }>;
+  return rows.map((row) => ({
+    message_rowid: row.message_rowid,
+    attachment_rowid: row.attachment_rowid,
+    filename: row.filename,
+    resolved_path: resolveAttachmentPath(row.filename ?? null),
+    mime_type: row.mime_type,
+    transfer_name: row.transfer_name,
+    total_bytes: row.total_bytes,
+    created_unix_ms: appleEpochToUnixMs(row.created_date_raw),
+  }));
 }

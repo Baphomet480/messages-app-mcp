@@ -6,8 +6,10 @@ Features
 - List recent chats with participants (from `~/Library/Messages/chat.db`).
 - Get recent messages for a chat or participant.
 - Send messages via AppleScript (iMessage/SMS).
-- Search messages by text with optional scoping and filters.
+- Search messages by text with optional scoping and filters; results include ISO timestamps and message-type hints.
 - Pull focused context windows around a specific message to minimize tokens.
+- Fetch attachment metadata and resolved file paths on demand with strict per-message caps.
+- Opt-in read-only mode to disable `send_text` when you only need to browse history.
 
 Requirements
 - macOS with Messages.app set up.
@@ -47,17 +49,24 @@ Integrate (Claude Desktop example)
   - In the Inspector UI, call `doctor`, `list_chats`, `get_messages`, or `send_text`.
 
 -Exposed Tools
-- `list_chats(limit?: number=50)` → Returns array with `chat_id`, `guid`, `display_name`, `participants[]`, `last_message_unix_ms`.
-- `get_messages({ chat_id?: number, participant?: string, limit?: number=50 })` → Recent messages for a chat or participant handle.
-  - `send_text({ recipient: string, text: string })` → Sends text via Messages.app. Use E.164 numbers like `+14155551212` or iMessage email handles.
-  - `search_messages({ query: string, chat_id?: number, participant?: string, from_unix_ms?: number, to_unix_ms?: number, from_me?: boolean, has_attachments?: boolean, limit?: number=50, offset?: number=0 })` → Find messages matching text with filters. Returns `message_rowid`, `chat_id`, `snippet`, timestamps, and flags.
-  - `context_around_message({ message_rowid: number, before?: number=10, after?: number=10 })` → Returns a small, ordered window of messages around the anchor to give Codex just-in-time context without sending entire threads.
-  - Responses mask recipients by default. To reveal full recipients in responses, set env var `MESSAGES_MCP_SHOW_FULL_RECIPIENTS=true` before starting the server.
-  - `doctor()` → Runs environment checks and returns a structured report with:
-    - `services`/`accounts` reported by Messages (e.g., iMessage, SMS)
-    - `iMessage_available` and `sms_available`
-    - `sqlite_access` and the `db_path` checked
-    - `notes[]` with recommended fixes (Full Disk Access, Text Message Forwarding, etc.)
+- `list_chats({ limit?: number=50, participant?: string, updated_after_unix_ms?: number, unread_only?: boolean })`
+  - Returns chat metadata with UNIX + ISO timestamps and unread counts.
+- `get_messages({ chat_id?: number, participant?: string, limit?: number=50, context_anchor_rowid?: number, context_before?: number=10, context_after?: number=10, context_include_attachments_meta?: boolean })`
+  - Messages include best-effort text (decoding `attributedBody` when needed), ISO timestamps, message type/subtype hints, and attachment previews. Optional inline context bundle avoids an extra `context_around_message` call.
+- `send_text({ recipient: string, text: string })`
+  - Disabled automatically when `MESSAGES_MCP_READONLY=true`.
+- `search_messages({ query: string, chat_id|participant|from/to unix, ... })`
+  - Requires at least one scope filter to prevent whole-database scans. Returns structured results with snippets, timestamps, and metadata.
+- `search_messages_safe({ query: string, chat_id?|participant?|days_back?, ... })`
+  - Convenience wrapper that auto-bounds the time range.
+- `context_around_message({ message_rowid: number, before?: number=10, after?: number=10, include_attachments_meta?: boolean })`
+  - Emits normalized messages with attachments metadata for the requested window.
+- `get_attachments({ message_rowids: number[], per_message_cap?: number=5 })`
+  - Resolves attachment transfer names, MIME types, byte sizes, and absolute file paths (still read-only).
+- `doctor()`
+  - Structured environment diagnostics with actionable remediation notes.
+
+Responses mask recipients by default. To reveal full recipients in responses, set env var `MESSAGES_MCP_SHOW_FULL_RECIPIENTS=true` before starting the server.
 
 Structured Output
 - For `list_chats` and `get_messages`, the server now returns both:
@@ -65,10 +74,10 @@ Structured Output
   - a text fallback containing pretty‑printed JSON for broad compatibility.
 
 Notes
-- Reading uses the system `sqlite3` CLI in read‑only mode with JSON output. If you see a permissions error, grant Full Disk Access and try again.
-- Message timestamps are converted from Apple epoch to UNIX milliseconds.
-- Search operates on the plain `message.text` column; rich `attributedBody` blobs are not searched.
-- Attachments and rich message bodies aren’t surfaced yet.
+- Reading uses the system `sqlite3` CLI in read-only mode with JSON output. If you see a permissions error, grant Full Disk Access and try again.
+- Message timestamps are converted from Apple epoch to UNIX milliseconds and exposed as both UNIX + ISO strings.
+- Search prefers the plain `message.text` column but transparently decodes `attributedBody` blobs for matches when possible.
+- Attachment metadata is surfaced via `get_messages`/`context_around_message` hints; full paths remain opt-in through `get_attachments`.
 
 Development
 - `npm run dev` to run from source via ts-node.
@@ -77,4 +86,5 @@ Development
 
 Security
 - No network calls are made; everything runs locally. The server only reads from Messages.db and uses AppleScript to send messages.
- - By default, tool responses mask recipients to reduce accidental exposure in logs. You can opt in to full recipients locally via `MESSAGES_MCP_SHOW_FULL_RECIPIENTS=true`. Do not commit any logs containing personal data.
+- Set `MESSAGES_MCP_READONLY=true` to start the server without any send capability (all tools become read-only).
+- By default, tool responses mask recipients to reduce accidental exposure in logs. You can opt in to full recipients locally via `MESSAGES_MCP_SHOW_FULL_RECIPIENTS=true`. Do not commit any logs containing personal data.
