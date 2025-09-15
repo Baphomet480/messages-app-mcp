@@ -81,7 +81,7 @@ export async function runDoctor(): Promise<DoctorReport & { summary: string }> {
     notes.push("Unable to read Messages chat.db. Grant Full Disk Access to your terminal app.");
   }
 
-  if (osascript_available && !iMessage_available && !sms_available) {
+  if (osascript_available && (servicesQueried ? (!iMessage_available && !sms_available) : false)) {
     notes.push("Messages services not detected. Open Messages and complete setup.");
   }
 
