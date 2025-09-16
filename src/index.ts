@@ -1,9 +1,15 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
+import express, { type Request, type Response } from "express";
+import cors from "cors";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { sendMessageAppleScript, runAppleScriptInline } from "./utils/applescript.js";
-import { listChats, getMessagesByChatId, getMessagesByParticipant, appleEpochToUnixMs, searchMessages, contextAroundMessage, getAttachmentsForMessages } from "./utils/sqlite.js";
+import { sendMessageAppleScript, sendAttachmentAppleScript, type SendTarget } from "./utils/applescript.js";
+import { listChats, getMessagesByChatId, getMessagesByParticipant, appleEpochToUnixMs, searchMessages, contextAroundMessage, getAttachmentsForMessages, getChatIdByGuid } from "./utils/sqlite.js";
 import { runDoctor } from "./utils/doctor.js";
 import type { EnrichedMessageRow, AttachmentInfo } from "./utils/sqlite.js";
 
@@ -58,6 +64,50 @@ function displayRecipient(recipient: string): string {
   return shouldMask() ? maskRecipient(recipient) : recipient;
 }
 
+type SendTargetInput = {
+  recipient?: string | null;
+  chat_guid?: string | null;
+  chat_name?: string | null;
+};
+
+function describeSendTarget(input: SendTargetInput): string {
+  if (input.chat_name && input.chat_name.trim().length > 0) {
+    return `chat "${input.chat_name.trim()}"`;
+  }
+  if (input.chat_guid && input.chat_guid.trim().length > 0) {
+    return `chat ${input.chat_guid.trim()}`;
+  }
+  if (input.recipient && input.recipient.trim().length > 0) {
+    return displayRecipient(input.recipient.trim());
+  }
+  return "target";
+}
+
+function hasTarget(input: SendTargetInput): boolean {
+  return Boolean(
+    (input.recipient && input.recipient.trim()) ||
+    (input.chat_guid && input.chat_guid.trim()) ||
+    (input.chat_name && input.chat_name.trim()),
+  );
+}
+
+function buildSendTarget(input: SendTargetInput): SendTarget {
+  if (!hasTarget(input)) {
+    throw new Error("Provide recipient, chat_guid, or chat_name.");
+  }
+  const target: SendTarget = {};
+  if (input.chat_guid && input.chat_guid.trim().length > 0) {
+    target.chatGuid = input.chat_guid.trim();
+  }
+  if (input.chat_name && input.chat_name.trim().length > 0) {
+    target.chatName = input.chat_name.trim();
+  }
+  if (input.recipient && input.recipient.trim().length > 0) {
+    target.recipient = input.recipient.trim();
+  }
+  return target;
+}
+
 function sanitizeText(s: string | null | undefined): string | null {
   if (s == null) return null;
   try {
@@ -79,6 +129,49 @@ function isReadOnly(): boolean {
 }
 
 const READ_ONLY_MODE = isReadOnly();
+
+function clampNumber(value: number, min: number, max: number): number {
+  if (Number.isNaN(value)) return min;
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+
+function parseEnvInt(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return clampNumber(parsed, min, max);
+}
+
+function parseEnvBool(name: string, fallback = false): boolean {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const normalized = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function parsePort(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return clampNumber(parsed, 1, 65535);
+}
+
+function parseCsv(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+const CONNECTOR_DEFAULT_DAYS_BACK = parseEnvInt("MESSAGES_MCP_CONNECTOR_DAYS_BACK", 30, 1, 365);
+const CONNECTOR_DEFAULT_LIMIT = parseEnvInt("MESSAGES_MCP_CONNECTOR_SEARCH_LIMIT", 20, 1, 50);
+const CONNECTOR_BASE_URL = (process.env.MESSAGES_MCP_CONNECTOR_BASE_URL || "").trim().replace(/\/+$/, "");
 
 function toIsoUtc(unixMs: number | null): string | null {
   if (unixMs == null) return null;
@@ -177,6 +270,20 @@ function normalizeMessage(row: EnrichedMessageRow & { chat_id?: number }): Norma
     messageType = "text";
   }
 
+  const metadata: Record<string, unknown> = {
+    associated_message_type: row.associated_message_type ?? null,
+    associated_message_guid: row.associated_message_guid ?? null,
+    thread_originator_guid: row.thread_originator_guid ?? null,
+    reply_to_guid: row.reply_to_guid ?? null,
+    expressive_send_style_id: row.expressive_send_style_id ?? null,
+    balloon_bundle_id: row.balloon_bundle_id ?? null,
+    item_type: row.item_type ?? null,
+    message_type_raw: row.message_type_raw ?? null,
+  };
+  if (row.attributed_body_meta) {
+    metadata.attributed_body = row.attributed_body_meta;
+  }
+
   return {
     message_rowid: row.message_rowid,
     chat_id: row.chat_id,
@@ -195,16 +302,7 @@ function normalizeMessage(row: EnrichedMessageRow & { chat_id?: number }): Norma
     subject: (row as any).subject ?? null,
     message_type: messageType,
     message_subtype: messageSubtype,
-    metadata: {
-      associated_message_type: row.associated_message_type ?? null,
-      associated_message_guid: row.associated_message_guid ?? null,
-      thread_originator_guid: row.thread_originator_guid ?? null,
-      reply_to_guid: row.reply_to_guid ?? null,
-      expressive_send_style_id: row.expressive_send_style_id ?? null,
-      balloon_bundle_id: row.balloon_bundle_id ?? null,
-      item_type: row.item_type ?? null,
-      message_type_raw: row.message_type_raw ?? null,
-    },
+    metadata,
   };
 }
 
@@ -272,445 +370,972 @@ function normalizeAttachment(info: AttachmentInfo) {
   };
 }
 
-const server = new McpServer(
-  { name: "messages.app-mcp", version: "0.1.0" },
-  {}
-);
-
-// send_text tool
-if (READ_ONLY_MODE) {
-  server.tool(
-    "send_text",
-    "Send a text/iMessage via Messages.app to a phone number or email.",
-    {
-      recipient: z.string().describe("Phone number in E.164 format or iMessage email."),
-      text: z.string().min(1).describe("Message text to send."),
-    },
-    async ({ recipient }) => {
-      const shown = displayRecipient(recipient);
-      return {
-        content: textContent(`Read-only mode is enabled; did not send to ${shown}.`),
-        isError: true,
-      };
-    }
+function createConfiguredServer(): McpServer {
+  const server = new McpServer(
+    { name: "messages.app-mcp", version: "0.1.0" },
+    {}
   );
-} else {
-  server.tool(
-    "send_text",
-    "Send a text/iMessage via Messages.app to a phone number or email.",
-    {
-      recipient: z.string().describe("Phone number in E.164 format or iMessage email."),
-      text: z.string().min(1).describe("Message text to send."),
-    },
-    async ({ recipient, text }) => {
-      try {
-        await sendMessageAppleScript(recipient, text);
-        const shown = displayRecipient(recipient);
-        return { content: textContent(`Sent message to ${shown}.`) };
-      } catch (e) {
-        const shown = displayRecipient(recipient);
-        const reason = cleanOsaError(e);
-        return { content: textContent(`Failed to send to ${shown}. ${reason}`), isError: true };
-      }
-    }
-  );
-}
 
-// doctor tool: checks environment and prerequisites
-server.registerTool(
-  "doctor",
-  {
-    title: "Environment Doctor",
-    description: "Diagnose Messages.app prerequisites: iMessage/SMS availability and DB access.",
-    outputSchema: {
-      ok: z.boolean(),
-      osascript_available: z.boolean(),
-      services: z.array(z.string()),
-      accounts: z.array(z.string()),
-      iMessage_available: z.boolean(),
-      sms_available: z.boolean(),
-      sqlite_access: z.boolean(),
-      db_path: z.string(),
-      notes: z.array(z.string()),
-    }
-  },
-  async () => {
-    const report = await runDoctor();
-    const { summary, ...structured } = report;
-    return {
-      content: textContent(summary + (structured.notes.length ? `\nnotes:\n- ${structured.notes.join("\n- ")}` : "")),
-      structuredContent: structured,
-    };
+  const sendTextInputSchema = {
+    recipient: z.string().min(1).describe("Phone number in E.164 format or iMessage email.").optional(),
+    chat_guid: z.string().min(1).describe("chat.db GUID, e.g., chat1234567890abcdef.").optional(),
+    chat_name: z.string().min(1).describe("Display name from Messages sidebar.").optional(),
+    text: z.string().min(1).describe("Message text to send."),
+  };
+
+  const sendAttachmentInputSchema = {
+    recipient: z.string().min(1).describe("Phone number in E.164 format or iMessage email.").optional(),
+    chat_guid: z.string().min(1).describe("chat.db GUID, e.g., chat1234567890abcdef.").optional(),
+    chat_name: z.string().min(1).describe("Display name from Messages sidebar.").optional(),
+    file_path: z.string().min(1).describe("Path to the file to send."),
+    caption: z.string().optional().describe("Optional caption sent before the attachment."),
+  };
+
+  const APPLESCRIPT_HANDLER_TEMPLATE = `-- Save as ~/Library/Application Scripts/com.apple.iChat/messages-mcp.scpt
+  using terms from application "Messages"
+    on message received theMessage from theBuddy for theChat
+      try
+        -- Forward minimal payload to MCP via CLI, HTTP hook, etc.
+        do shell script "/usr/bin/logger 'messages-mcp incoming: ' & quoted form of theMessage"
+      on error handlerError
+        do shell script "/usr/bin/logger 'messages-mcp handler error: ' & quoted form of handlerError"
+      end try
+    end message received
+
+    on message sent theMessage for theChat
+      -- Example: notify MCP of outbound messages
+      try
+        do shell script "/usr/bin/logger 'messages-mcp sent: ' & quoted form of theMessage"
+      end try
+    end message sent
+
+    on received file transfer invitation theTransfer
+      -- Auto-accept incoming attachments
+      try
+        accept theTransfer
+      end try
+    end received file transfer invitation
+  end using terms from`;
+
+  function renderHandlerTemplate(minimal = false): string {
+    if (!minimal) return APPLESCRIPT_HANDLER_TEMPLATE;
+    return APPLESCRIPT_HANDLER_TEMPLATE
+      .split("\n")
+      .filter((line) => line.trim().length === 0 || !line.trim().startsWith("--"))
+      .join("\n");
   }
-);
 
-// list_chats tool with structured output
-server.registerTool(
-  "list_chats",
-  {
-    description: "List recent chats from Messages.db with participants and last-activity.",
-    inputSchema: {
-      limit: z.number().int().min(1).max(500).default(50),
-      participant: z.string().optional(),
-      updated_after_unix_ms: z.number().int().optional(),
-      unread_only: z.boolean().optional(),
-    },
-    outputSchema: {
-      chats: z.array(z.object({
-        chat_id: z.number(),
-        guid: z.string(),
-        display_name: z.string().nullable(),
-        participants: z.array(z.string()),
-        last_message_unix_ms: z.number().nullable(),
-        last_message_iso_utc: z.string().nullable(),
-        last_message_iso_local: z.string().nullable(),
-        unread_count: z.number().nullable(),
-      }))
-    }
-  },
-  async ({ limit, participant, updated_after_unix_ms, unread_only }) => {
-    try {
-      const rows = await listChats(limit, {
-        participant: participant ?? undefined,
-        updatedAfterUnixMs: updated_after_unix_ms ?? undefined,
-        unreadOnly: unread_only ?? false,
-      });
-      const mapped = rows.map((r) => {
-        const unix = appleEpochToUnixMs(r.last_message_date);
-        return {
-          chat_id: r.chat_id,
-          guid: r.guid,
-          display_name: r.display_name ?? null,
-          participants: r.participants ? r.participants.split(",") : [],
-          last_message_unix_ms: unix,
-          last_message_iso_utc: toIsoUtc(unix),
-          last_message_iso_local: toIsoLocal(unix),
-          unread_count: r.unread_count ?? null,
-        };
-      });
-      const structuredContent = { chats: mapped };
-      return {
-        content: textContent(JSON.stringify(mapped, null, 2)),
-        structuredContent,
-      };
-    } catch (e) {
-      const msg = `Failed to read Messages database. Grant Full Disk Access to your terminal/CLI and try again. Error: ${(e as Error).message}`;
-      return { content: textContent(msg), isError: true };
-    }
-  }
-);
-
-// get_messages tool with structured output
-server.registerTool(
-  "get_messages",
-  {
-    description: "Get recent messages by chat_id or participant handle (phone/email).",
-    inputSchema: {
-      chat_id: z.number().int().optional(),
-      participant: z.string().optional(),
-      limit: z.number().int().min(1).max(500).default(50),
-      context_anchor_rowid: z.number().int().optional(),
-      context_before: z.number().int().min(0).max(200).default(10),
-      context_after: z.number().int().min(0).max(200).default(10),
-      context_include_attachments_meta: z.boolean().optional(),
-    },
-    outputSchema: {
-      messages: z.array(normalizedMessageSchema),
-      context: z.object({
-        anchor_rowid: z.number(),
-        before: z.number(),
-        after: z.number(),
-        include_attachments_meta: z.boolean(),
-        messages: z.array(normalizedMessageSchema),
-      }).optional(),
-    }
-  },
-  async ({ chat_id, participant, limit, context_anchor_rowid, context_before, context_after, context_include_attachments_meta }) => {
-    if (chat_id == null && !participant) {
-      return { content: textContent("Provide either chat_id or participant."), isError: true };
-    }
-    try {
-      const rows = chat_id != null
-        ? await getMessagesByChatId(chat_id, limit)
-        : await getMessagesByParticipant(participant!, limit);
-      const mapped = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
-      const structuredContent: { messages: NormalizedMessage[]; context?: { anchor_rowid: number; before: number; after: number; include_attachments_meta: boolean; messages: NormalizedMessage[] } } = { messages: mapped };
-      if (context_anchor_rowid != null) {
-        const ctxRows = await contextAroundMessage(context_anchor_rowid, context_before, context_after, !!context_include_attachments_meta);
-        const ctxMessages = normalizeMessages(ctxRows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
-        structuredContent.context = {
-          anchor_rowid: context_anchor_rowid,
-          before: context_before,
-          after: context_after,
-          include_attachments_meta: !!context_include_attachments_meta,
-          messages: ctxMessages,
-        };
-      }
-      return {
-        content: textContent(JSON.stringify(structuredContent, null, 2)),
-        structuredContent,
-      };
-    } catch (e) {
-      const msg = `Failed to query messages. Confirm Messages access (Full Disk Access) and that Messages is running at least once. Error: ${(e as Error).message}`;
-      return { content: textContent(msg), isError: true };
-    }
-  }
-);
-
-// search_messages tool
-server.registerTool(
-  "search_messages",
-  {
-    description: "Search messages by text with optional scoping and filters.",
-    inputSchema: {
-      query: z.string().min(1),
-      chat_id: z.number().int().optional(),
-      participant: z.string().optional(),
-      from_unix_ms: z.number().int().optional(),
-      to_unix_ms: z.number().int().optional(),
-      from_me: z.boolean().optional(),
-      has_attachments: z.boolean().optional(),
-      limit: z.number().int().min(1).max(500).default(50),
-      offset: z.number().int().min(0).default(0),
-      include_attachments_meta: z.boolean().optional(),
-    },
-    outputSchema: {
-      results: z.array(searchResultSchema)
-    }
-  },
-  async (input) => {
-    if (input.chat_id == null && !input.participant && input.from_unix_ms == null && input.to_unix_ms == null) {
-      return {
-        content: textContent("Provide chat_id, participant, or from/to unix filters when searching to avoid full-database scans."),
-        isError: true,
-      };
-    }
-    try {
-      const rows = await searchMessages({
-        query: input.query,
-        chatId: input.chat_id ?? undefined,
-        participant: input.participant ?? undefined,
-        fromUnixMs: input.from_unix_ms ?? undefined,
-        toUnixMs: input.to_unix_ms ?? undefined,
-        fromMe: input.from_me ?? undefined,
-        hasAttachments: input.has_attachments ?? undefined,
-        limit: input.limit,
-        offset: input.offset,
-        includeAttachmentsMeta: !!input.include_attachments_meta,
-      });
-      const lowerQ = input.query.toLowerCase();
-      const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id: number }>);
-      const chatLookup = new Map<number, number>();
-      for (const row of rows as Array<EnrichedMessageRow & { chat_id: number }>) {
-        chatLookup.set(row.message_rowid, row.chat_id);
-      }
-      const mapped = normalized.map((msg) => {
-        const text = msg.text ?? "";
-        const idx = text.toLowerCase().indexOf(lowerQ);
-        let snippet: string | null = null;
-        if (idx >= 0) {
-          const start = Math.max(0, idx - 40);
-          const end = Math.min(text.length, idx + lowerQ.length + 40);
-          snippet = `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
+  // send_text tool
+  if (READ_ONLY_MODE) {
+    server.tool(
+      "send_text",
+      "Send a text/iMessage via Messages.app to a phone number or email.",
+      sendTextInputSchema,
+      async ({ recipient, chat_guid, chat_name }) => {
+        const base = { recipient, chat_guid, chat_name };
+        if (!hasTarget(base)) {
+          return {
+            content: textContent("Missing target. Provide recipient, chat_guid, or chat_name."),
+            isError: true,
+          };
         }
-        const chatId = msg.chat_id ?? chatLookup.get(msg.message_rowid) ?? 0;
-        return { ...msg, chat_id: chatId, snippet };
-      });
+        const shown = describeSendTarget(base);
+        return {
+          content: textContent(`Read-only mode is enabled; did not send to ${shown}.`),
+          isError: true,
+        };
+      }
+    );
+  } else {
+    server.tool(
+      "send_text",
+      "Send a text/iMessage via Messages.app to a phone number or email.",
+      sendTextInputSchema,
+      async ({ recipient, chat_guid, chat_name, text }) => {
+        try {
+          const base = { recipient, chat_guid, chat_name };
+          const target = buildSendTarget(base);
+          await sendMessageAppleScript(target, text);
+          const shown = describeSendTarget(base);
+          return { content: textContent(`Sent message to ${shown}.`) };
+        } catch (e) {
+          const base = { recipient, chat_guid, chat_name };
+          const shown = hasTarget(base) ? describeSendTarget(base) : "target";
+          const reason = cleanOsaError(e);
+          return { content: textContent(`Failed to send to ${shown}. ${reason}`), isError: true };
+        }
+      }
+    );
+  }
+
+  if (READ_ONLY_MODE) {
+    server.tool(
+      "send_attachment",
+      "Send an attachment via Messages.app to a recipient or existing chat.",
+      sendAttachmentInputSchema,
+      async () => ({
+        content: textContent("Attachment sending is temporarily disabled while we stabilize delivery."),
+        isError: true,
+      })
+    );
+  } else {
+    server.tool(
+      "send_attachment",
+      "Send an attachment via Messages.app to a recipient or existing chat.",
+      sendAttachmentInputSchema,
+      async () => ({
+        content: textContent("Attachment sending is temporarily disabled while we stabilize delivery."),
+        isError: true,
+      })
+    );
+  }
+
+  server.tool(
+    "applescript_handler_template",
+    "Return a starter AppleScript script for Messages event handlers (message received/sent, transfer invitation).",
+    {
+      minimal: z.boolean().optional().describe("Set true to omit inline comments."),
+    },
+    async ({ minimal }) => {
+      const script = renderHandlerTemplate(Boolean(minimal));
       return {
-        content: textContent(JSON.stringify(mapped, null, 2)),
-        structuredContent: { results: mapped },
+        content: textContent(`Save this AppleScript as ~/Library/Application Scripts/com.apple.iChat/messages-mcp.scpt and enable scripting in Messages.\n\n${script}`),
       };
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      if (/scope filter/i.test(message) || /requires at least one scope/i.test(message)) {
+    }
+  );
+
+  // doctor tool: checks environment and prerequisites
+  server.registerTool(
+    "doctor",
+    {
+      title: "Environment Doctor",
+      description: "Diagnose Messages.app prerequisites: iMessage/SMS availability and DB access.",
+      outputSchema: {
+        ok: z.boolean(),
+        osascript_available: z.boolean(),
+        services: z.array(z.string()),
+        accounts: z.array(z.string()),
+        iMessage_available: z.boolean(),
+        sms_available: z.boolean(),
+        sqlite_access: z.boolean(),
+        db_path: z.string(),
+        notes: z.array(z.string()),
+      }
+    },
+    async () => {
+      const report = await runDoctor();
+      const { summary, ...structured } = report;
+      return {
+        content: textContent(summary + (structured.notes.length ? `\nnotes:\n- ${structured.notes.join("\n- ")}` : "")),
+        structuredContent: structured,
+      };
+    }
+  );
+
+  // list_chats tool with structured output
+  server.registerTool(
+    "list_chats",
+    {
+      description: "List recent chats from Messages.db with participants and last-activity.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(500).default(50),
+        participant: z.string().optional(),
+        updated_after_unix_ms: z.number().int().optional(),
+        unread_only: z.boolean().optional(),
+      },
+      outputSchema: {
+        chats: z.array(z.object({
+          chat_id: z.number(),
+          guid: z.string(),
+          display_name: z.string().nullable(),
+          participants: z.array(z.string()),
+          last_message_unix_ms: z.number().nullable(),
+          last_message_iso_utc: z.string().nullable(),
+          last_message_iso_local: z.string().nullable(),
+          unread_count: z.number().nullable(),
+        }))
+      }
+    },
+    async ({ limit, participant, updated_after_unix_ms, unread_only }) => {
+      try {
+        const rows = await listChats(limit, {
+          participant: participant ?? undefined,
+          updatedAfterUnixMs: updated_after_unix_ms ?? undefined,
+          unreadOnly: unread_only ?? false,
+        });
+        const mapped = rows.map((r) => {
+          const unix = appleEpochToUnixMs(r.last_message_date);
+          return {
+            chat_id: r.chat_id,
+            guid: r.guid,
+            display_name: r.display_name ?? null,
+            participants: r.participants ? r.participants.split(",") : [],
+            last_message_unix_ms: unix,
+            last_message_iso_utc: toIsoUtc(unix),
+            last_message_iso_local: toIsoLocal(unix),
+            unread_count: r.unread_count ?? null,
+          };
+        });
+        const structuredContent = { chats: mapped };
+        return {
+          content: textContent(JSON.stringify(mapped, null, 2)),
+          structuredContent,
+        };
+      } catch (e) {
+        const msg = `Failed to read Messages database. Grant Full Disk Access to your terminal/CLI and try again. Error: ${(e as Error).message}`;
+        return { content: textContent(msg), isError: true };
+      }
+    }
+  );
+
+  // get_messages tool with structured output
+  server.registerTool(
+    "get_messages",
+    {
+      description: "Get recent messages by chat_id or participant handle (phone/email).",
+      inputSchema: {
+        chat_id: z.number().int().optional(),
+        participant: z.string().optional(),
+        limit: z.number().int().min(1).max(500).default(50),
+        context_anchor_rowid: z.number().int().optional(),
+        context_before: z.number().int().min(0).max(200).default(10),
+        context_after: z.number().int().min(0).max(200).default(10),
+        context_include_attachments_meta: z.boolean().optional(),
+      },
+      outputSchema: {
+        messages: z.array(normalizedMessageSchema),
+        context: z.object({
+          anchor_rowid: z.number(),
+          before: z.number(),
+          after: z.number(),
+          include_attachments_meta: z.boolean(),
+          messages: z.array(normalizedMessageSchema),
+        }).optional(),
+      }
+    },
+    async ({ chat_id, participant, limit, context_anchor_rowid, context_before, context_after, context_include_attachments_meta }) => {
+      if (chat_id == null && !participant) {
+        return { content: textContent("Provide either chat_id or participant."), isError: true };
+      }
+      try {
+        const rows = chat_id != null
+          ? await getMessagesByChatId(chat_id, limit)
+          : await getMessagesByParticipant(participant!, limit);
+        const mapped = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
+        const structuredContent: { messages: NormalizedMessage[]; context?: { anchor_rowid: number; before: number; after: number; include_attachments_meta: boolean; messages: NormalizedMessage[] } } = { messages: mapped };
+        if (context_anchor_rowid != null) {
+          const ctxRows = await contextAroundMessage(context_anchor_rowid, context_before, context_after, !!context_include_attachments_meta);
+          const ctxMessages = normalizeMessages(ctxRows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
+          structuredContent.context = {
+            anchor_rowid: context_anchor_rowid,
+            before: context_before,
+            after: context_after,
+            include_attachments_meta: !!context_include_attachments_meta,
+            messages: ctxMessages,
+          };
+        }
+        return {
+          content: textContent(JSON.stringify(structuredContent, null, 2)),
+          structuredContent,
+        };
+      } catch (e) {
+        const msg = `Failed to query messages. Confirm Messages access (Full Disk Access) and that Messages is running at least once. Error: ${(e as Error).message}`;
+        return { content: textContent(msg), isError: true };
+      }
+    }
+  );
+
+  // search_messages tool
+  server.registerTool(
+    "search_messages",
+    {
+      description: "Search messages by text with optional scoping and filters.",
+      inputSchema: {
+        query: z.string().min(1),
+        chat_id: z.number().int().optional(),
+        participant: z.string().optional(),
+        from_unix_ms: z.number().int().optional(),
+        to_unix_ms: z.number().int().optional(),
+        from_me: z.boolean().optional(),
+        has_attachments: z.boolean().optional(),
+        limit: z.number().int().min(1).max(500).default(50),
+        offset: z.number().int().min(0).default(0),
+        include_attachments_meta: z.boolean().optional(),
+      },
+      outputSchema: {
+        results: z.array(searchResultSchema)
+      }
+    },
+    async (input) => {
+      if (input.chat_id == null && !input.participant && input.from_unix_ms == null && input.to_unix_ms == null) {
         return {
           content: textContent("Provide chat_id, participant, or from/to unix filters when searching to avoid full-database scans."),
           isError: true,
         };
       }
-      const msg = `Failed to search messages. Verify Full Disk Access and try narrowing your filters. Error: ${message}`;
-      return { content: textContent(msg), isError: true };
-    }
+      try {
+        const rows = await searchMessages({
+          query: input.query,
+          chatId: input.chat_id ?? undefined,
+          participant: input.participant ?? undefined,
+          fromUnixMs: input.from_unix_ms ?? undefined,
+          toUnixMs: input.to_unix_ms ?? undefined,
+          fromMe: input.from_me ?? undefined,
+          hasAttachments: input.has_attachments ?? undefined,
+          limit: input.limit,
+          offset: input.offset,
+          includeAttachmentsMeta: !!input.include_attachments_meta,
+        });
+        const lowerQ = input.query.toLowerCase();
+        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id: number }>);
+        const chatLookup = new Map<number, number>();
+        for (const row of rows as Array<EnrichedMessageRow & { chat_id: number }>) {
+          chatLookup.set(row.message_rowid, row.chat_id);
+        }
+        const mapped = normalized.map((msg) => {
+          const text = msg.text ?? "";
+          const idx = text.toLowerCase().indexOf(lowerQ);
+          let snippet: string | null = null;
+          if (idx >= 0) {
+            const start = Math.max(0, idx - 40);
+            const end = Math.min(text.length, idx + lowerQ.length + 40);
+            snippet = `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
+          }
+          const chatId = msg.chat_id ?? chatLookup.get(msg.message_rowid) ?? 0;
+          return { ...msg, chat_id: chatId, snippet };
+        });
+        return {
+          content: textContent(JSON.stringify(mapped, null, 2)),
+          structuredContent: { results: mapped },
+        };
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        if (/scope filter/i.test(message) || /requires at least one scope/i.test(message)) {
+          return {
+            content: textContent("Provide chat_id, participant, or from/to unix filters when searching to avoid full-database scans."),
+            isError: true,
+          };
+        }
+        const msg = `Failed to search messages. Verify Full Disk Access and try narrowing your filters. Error: ${message}`;
+        return { content: textContent(msg), isError: true };
+      }
   }
 );
+
+  // connectors-compatible search tool (ChatGPT Pro, Deep Research, API connectors)
+  server.registerTool(
+    "search",
+    {
+      title: "Search Messages",
+      description: "Full-text search across Messages.app history scoped to recent activity for MCP connectors.",
+      inputSchema: {
+        query: z.string().min(1).describe("Search query string."),
+        chat_guid: z.string().min(1).optional().describe("Optional chat GUID to scope results."),
+        participant: z.string().optional().describe("Optional handle (phone or email) to scope results."),
+        days_back: z.number().int().min(1).max(365).optional().describe("How many days of history to include (default from env)."),
+        limit: z.number().int().min(1).max(50).optional().describe("Maximum number of documents to return."),
+      },
+    },
+    async ({ query, chat_guid, participant, days_back, limit }) => {
+      const trimmedQuery = query.trim();
+      if (!trimmedQuery) {
+        return { content: textContent('{"results":[]}') };
+      }
+      const effectiveDays = clampNumber(days_back ?? CONNECTOR_DEFAULT_DAYS_BACK, 1, 365);
+      const resultLimit = clampNumber(limit ?? CONNECTOR_DEFAULT_LIMIT, 1, 50);
+      const fromUnixMs = Date.now() - effectiveDays * 86400000;
+      let chatId: number | undefined;
+      if (chat_guid) {
+        const resolvedChatId = await getChatIdByGuid(chat_guid);
+        if (resolvedChatId == null) {
+          return { content: textContent('{"results":[]}') };
+        }
+        chatId = resolvedChatId;
+      }
+      try {
+        const rows = await searchMessages({
+          query: trimmedQuery,
+          chatId: chatId ?? undefined,
+          participant: participant ?? undefined,
+          fromUnixMs,
+          limit: resultLimit,
+          includeAttachmentsMeta: true,
+        });
+        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id: number }>);
+        const chatLookup = new Map<number, number>();
+        for (const row of rows as Array<EnrichedMessageRow & { chat_id: number }>) {
+          chatLookup.set(row.message_rowid, row.chat_id);
+        }
+        const lowerQuery = trimmedQuery.toLowerCase();
+        const results = normalized.map((msg) => {
+          const text = msg.text ?? "";
+          const idx = text.toLowerCase().indexOf(lowerQuery);
+          let snippet = text;
+          if (text) {
+            const singleLine = text.replace(/\s+/g, " ").trim();
+            if (idx >= 0) {
+              const start = Math.max(0, idx - 80);
+              const end = Math.min(singleLine.length, idx + lowerQuery.length + 80);
+              snippet = `${start > 0 ? "…" : ""}${singleLine.slice(start, end)}${end < singleLine.length ? "…" : ""}`;
+            } else {
+              snippet = singleLine.length > 200 ? `${singleLine.slice(0, 197)}…` : singleLine;
+            }
+          } else if (msg.has_attachments && msg.attachment_hints?.length) {
+            const hint = msg.attachment_hints[0];
+            snippet = `Attachment: ${hint.name || hint.filename || hint.mime || "file"}`;
+          } else {
+            snippet = "(no text)";
+          }
+          const counterpart = msg.from_me ? "Me" : (msg.sender ? displayRecipient(msg.sender) : "Unknown sender");
+          const timestamp = msg.iso_local ?? msg.iso_utc ?? null;
+          const titleParts = [] as string[];
+          if (counterpart) titleParts.push(counterpart);
+          if (timestamp) titleParts.push(timestamp);
+          if (!titleParts.length && snippet) {
+            titleParts.push(snippet.slice(0, 80));
+          }
+          const baseUrl = CONNECTOR_BASE_URL || "mcp://messages.app-mcp";
+          const resultId = `message:${msg.message_rowid}`;
+          const resolvedChatId = msg.chat_id ?? chatLookup.get(msg.message_rowid);
+          const metadataChatId = typeof resolvedChatId === "number" && Number.isFinite(resolvedChatId) ? resolvedChatId : null;
+          return {
+            id: resultId,
+            title: titleParts.join(" • ") || `Message ${msg.message_rowid}`,
+            url: `${baseUrl}/messages/${msg.message_rowid}`,
+            snippet,
+            metadata: {
+              chat_id: metadataChatId,
+              from_me: msg.from_me,
+              sender: msg.sender ? displayRecipient(msg.sender) : null,
+              iso_utc: msg.iso_utc,
+              iso_local: msg.iso_local,
+            },
+          };
+        });
+        return {
+          content: textContent(JSON.stringify({ results })),
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: textContent(JSON.stringify({ results: [], error: message })),
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.registerTool(
+    "fetch",
+    {
+      title: "Fetch Message",
+      description: "Return full message content and optional context for MCP connectors.",
+      inputSchema: {
+        id: z.string().min(1).describe("Identifier from search results (e.g., message:12345)."),
+        context_before: z.number().int().min(0).max(50).default(5).optional().describe("How many messages before to include in text."),
+        context_after: z.number().int().min(0).max(50).default(5).optional().describe("How many messages after to include in text."),
+      },
+    },
+    async ({ id, context_before, context_after }) => {
+      const normalizedId = String(id).trim();
+      const numericMatch = normalizedId.match(/(\d+)$/);
+      if (!numericMatch) {
+        return {
+          content: textContent(JSON.stringify({ error: "Invalid message identifier", id: normalizedId })),
+          isError: true,
+        };
+      }
+      const rowId = Number.parseInt(numericMatch[1], 10);
+      if (!Number.isFinite(rowId) || rowId <= 0) {
+        return {
+          content: textContent(JSON.stringify({ error: "Invalid message identifier", id: normalizedId })),
+          isError: true,
+        };
+      }
+      const before = clampNumber(context_before ?? 5, 0, 50);
+      const after = clampNumber(context_after ?? 5, 0, 50);
+      const rows = await contextAroundMessage(rowId, before, after, true);
+      if (!rows.length) {
+        return {
+          content: textContent(JSON.stringify({ error: "Message not found", id: normalizedId })),
+          isError: true,
+        };
+      }
+      const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>);
+      const anchor = normalized.find((msg) => msg.message_rowid === rowId);
+      if (!anchor) {
+        return {
+          content: textContent(JSON.stringify({ error: "Message not found", id: normalizedId })),
+          isError: true,
+        };
+      }
+      const formatLine = (msg: NormalizedMessage): string => {
+        const when = msg.iso_local ?? msg.iso_utc ?? "";
+        const speaker = msg.from_me ? "Me" : (msg.sender ? displayRecipient(msg.sender) : "Unknown");
+        let body = msg.text?.trim().length ? msg.text.trim() : "";
+        if (!body) {
+          if (msg.has_attachments && msg.attachment_hints?.length) {
+            const names = msg.attachment_hints.map((hint) => hint.name || hint.filename || hint.mime).filter(Boolean);
+            body = `Attachment: ${names.join(", ") || "file"}`;
+          } else {
+            body = "(no text)";
+          }
+        }
+        return [when, speaker, body].filter(Boolean).join(" | ");
+      };
+      const contextLines = normalized.map(formatLine);
+      const baseUrl = CONNECTOR_BASE_URL || "mcp://messages.app-mcp";
+      const document = {
+        id: `message:${rowId}`,
+        title: formatLine(anchor),
+        text: contextLines.join("\n"),
+        url: `${baseUrl}/messages/${rowId}`,
+        metadata: {
+          chat_id: anchor.chat_id ?? null,
+          from_me: anchor.from_me,
+          sender: anchor.sender ? displayRecipient(anchor.sender) : null,
+          iso_utc: anchor.iso_utc,
+          iso_local: anchor.iso_local,
+          has_attachments: anchor.has_attachments,
+          context_before: before,
+          context_after: after,
+        },
+      };
+      return {
+        content: textContent(JSON.stringify(document)),
+      };
+    }
+  );
 
 // context_around_message tool
-server.registerTool(
-  "context_around_message",
-  {
-    description: "Fetch N messages before and after a message_rowid within its chat (ordered by time).",
-    inputSchema: {
-      message_rowid: z.number().int(),
-      before: z.number().int().min(0).max(200).default(10),
-      after: z.number().int().min(0).max(200).default(10),
-      include_attachments_meta: z.boolean().optional(),
-    },
-    outputSchema: {
-      messages: z.array(normalizedMessageSchema)
-    }
-  },
-  async ({ message_rowid, before, after, include_attachments_meta }) => {
-    const rows = await contextAroundMessage(message_rowid, before, after, !!include_attachments_meta);
-    const mapped = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
-    return {
-      content: textContent(JSON.stringify(mapped, null, 2)),
-      structuredContent: { messages: mapped },
-    };
-  }
-);
-
-// get_attachments tool
-server.registerTool(
-  "get_attachments",
-  {
-    description: "Fetch attachment metadata and resolved file paths for specific message row IDs (per-message cap enforced).",
-    inputSchema: {
-      message_rowids: z.array(z.number().int()).min(1).max(50),
-      per_message_cap: z.number().int().min(1).max(10).default(5),
-    },
-    outputSchema: {
-      attachments: z.array(attachmentRecordSchema),
-    }
-  },
-  async ({ message_rowids, per_message_cap }) => {
-    try {
-      const infos = await getAttachmentsForMessages(message_rowids, per_message_cap);
-      const mapped = infos.map((info) => normalizeAttachment(info));
-      return {
-        content: textContent(JSON.stringify(mapped, null, 2)),
-        structuredContent: { attachments: mapped },
-      };
-    } catch (e) {
-      const msg = `Failed to retrieve attachments. Confirm database access permissions. Error: ${(e as Error).message}`;
-      return { content: textContent(msg), isError: true };
-    }
-  }
-);
-
-// search_messages_safe tool enforces scope/recency
-server.registerTool(
-  "search_messages_safe",
-  {
-    description: "Global search with required scope: must provide chat_id, participant, or days_back (defaults to 30). Hard cap on limit.",
-    inputSchema: {
-      query: z.string().min(1),
-      chat_id: z.number().int().optional(),
-      participant: z.string().optional(),
-      days_back: z.number().int().min(1).max(365).default(30),
-      from_me: z.boolean().optional(),
-      has_attachments: z.boolean().optional(),
-      limit: z.number().int().min(1).max(200).default(50),
-      offset: z.number().int().min(0).default(0),
-      include_attachments_meta: z.boolean().optional(),
-    },
-    outputSchema: {
-      results: z.array(searchResultSchema)
-    }
-  },
-  async (input) => {
-    if (input.chat_id == null && !input.participant && !(input.days_back && input.days_back > 0)) {
-      return { content: textContent("Provide chat_id, participant, or days_back."), isError: true };
-    }
-    const now = Date.now();
-    const from = input.chat_id != null || input.participant ? undefined : (now - (input.days_back ?? 30) * 86400000);
-    try {
-      const rows = await searchMessages({
-        query: input.query,
-        chatId: input.chat_id ?? undefined,
-        participant: input.participant ?? undefined,
-        fromUnixMs: from,
-        toUnixMs: undefined,
-        fromMe: input.from_me ?? undefined,
-        hasAttachments: input.has_attachments ?? undefined,
-        limit: input.limit,
-        offset: input.offset,
-        includeAttachmentsMeta: !!input.include_attachments_meta,
-      });
-      const lowerQ = input.query.toLowerCase();
-      const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id: number }>);
-      const chatLookup = new Map<number, number>();
-      for (const row of rows as Array<EnrichedMessageRow & { chat_id: number }>) {
-        chatLookup.set(row.message_rowid, row.chat_id);
+  server.registerTool(
+    "context_around_message",
+    {
+      description: "Fetch N messages before and after a message_rowid within its chat (ordered by time).",
+      inputSchema: {
+        message_rowid: z.number().int(),
+        before: z.number().int().min(0).max(200).default(10),
+        after: z.number().int().min(0).max(200).default(10),
+        include_attachments_meta: z.boolean().optional(),
+      },
+      outputSchema: {
+        messages: z.array(normalizedMessageSchema)
       }
-      const mapped = normalized.map((msg) => {
-        const text = msg.text ?? "";
-        const idx = text.toLowerCase().indexOf(lowerQ);
-        let snippet: string | null = null;
-        if (idx >= 0) {
-          const start = Math.max(0, idx - 40);
-          const end = Math.min(text.length, idx + lowerQ.length + 40);
-          snippet = `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
-        }
-        const chatId = msg.chat_id ?? chatLookup.get(msg.message_rowid) ?? 0;
-        return { ...msg, chat_id: chatId, snippet };
-      });
+    },
+    async ({ message_rowid, before, after, include_attachments_meta }) => {
+      const rows = await contextAroundMessage(message_rowid, before, after, !!include_attachments_meta);
+      const mapped = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
       return {
         content: textContent(JSON.stringify(mapped, null, 2)),
-        structuredContent: { results: mapped },
+        structuredContent: { messages: mapped },
       };
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      const msg = `Failed to search messages safely. Error: ${message}`;
-      return { content: textContent(msg), isError: true };
+    }
+  );
+
+  // get_attachments tool
+  server.registerTool(
+    "get_attachments",
+    {
+      description: "Fetch attachment metadata and resolved file paths for specific message row IDs (per-message cap enforced).",
+      inputSchema: {
+        message_rowids: z.array(z.number().int()).min(1).max(50),
+        per_message_cap: z.number().int().min(1).max(10).default(5),
+      },
+      outputSchema: {
+        attachments: z.array(attachmentRecordSchema),
+      }
+    },
+    async ({ message_rowids, per_message_cap }) => {
+      try {
+        const infos = await getAttachmentsForMessages(message_rowids, per_message_cap);
+        const mapped = infos.map((info) => normalizeAttachment(info));
+        return {
+          content: textContent(JSON.stringify(mapped, null, 2)),
+          structuredContent: { attachments: mapped },
+        };
+      } catch (e) {
+        const msg = `Failed to retrieve attachments. Confirm database access permissions. Error: ${(e as Error).message}`;
+        return { content: textContent(msg), isError: true };
+      }
+    }
+  );
+
+  // search_messages_safe tool enforces scope/recency
+  server.registerTool(
+    "search_messages_safe",
+    {
+      description: "Global search with required scope: must provide chat_id, participant, or days_back (defaults to 30). Hard cap on limit.",
+      inputSchema: {
+        query: z.string().min(1),
+        chat_id: z.number().int().optional(),
+        participant: z.string().optional(),
+        days_back: z.number().int().min(1).max(365).default(30),
+        from_me: z.boolean().optional(),
+        has_attachments: z.boolean().optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+        offset: z.number().int().min(0).default(0),
+        include_attachments_meta: z.boolean().optional(),
+      },
+      outputSchema: {
+        results: z.array(searchResultSchema)
+      }
+    },
+    async (input) => {
+      if (input.chat_id == null && !input.participant && !(input.days_back && input.days_back > 0)) {
+        return { content: textContent("Provide chat_id, participant, or days_back."), isError: true };
+      }
+      const now = Date.now();
+      const from = input.chat_id != null || input.participant ? undefined : (now - (input.days_back ?? 30) * 86400000);
+      try {
+        const rows = await searchMessages({
+          query: input.query,
+          chatId: input.chat_id ?? undefined,
+          participant: input.participant ?? undefined,
+          fromUnixMs: from,
+          toUnixMs: undefined,
+          fromMe: input.from_me ?? undefined,
+          hasAttachments: input.has_attachments ?? undefined,
+          limit: input.limit,
+          offset: input.offset,
+          includeAttachmentsMeta: !!input.include_attachments_meta,
+        });
+        const lowerQ = input.query.toLowerCase();
+        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id: number }>);
+        const chatLookup = new Map<number, number>();
+        for (const row of rows as Array<EnrichedMessageRow & { chat_id: number }>) {
+          chatLookup.set(row.message_rowid, row.chat_id);
+        }
+        const mapped = normalized.map((msg) => {
+          const text = msg.text ?? "";
+          const idx = text.toLowerCase().indexOf(lowerQ);
+          let snippet: string | null = null;
+          if (idx >= 0) {
+            const start = Math.max(0, idx - 40);
+            const end = Math.min(text.length, idx + lowerQ.length + 40);
+            snippet = `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
+          }
+          const chatId = msg.chat_id ?? chatLookup.get(msg.message_rowid) ?? 0;
+          return { ...msg, chat_id: chatId, snippet };
+        });
+        return {
+          content: textContent(JSON.stringify(mapped, null, 2)),
+          structuredContent: { results: mapped },
+        };
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        const msg = `Failed to search messages safely. Error: ${message}`;
+        return { content: textContent(msg), isError: true };
+      }
+    }
+  );
+
+  // summarize_window tool
+  server.registerTool(
+    "summarize_window",
+    {
+      description: "Summarize a small window around an anchor message (by rowid) for low-token analysis.",
+      inputSchema: {
+        message_rowid: z.number().int(),
+        before: z.number().int().min(0).max(200).default(50),
+        after: z.number().int().min(0).max(200).default(50),
+        max_chars: z.number().int().min(200).max(20000).default(2000),
+      },
+      outputSchema: {
+        summary: z.string(),
+        lines: z.array(z.string()),
+      }
+    },
+    async ({ message_rowid, before, after, max_chars }) => {
+      const rows = await contextAroundMessage(message_rowid, before, after, false);
+      const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
+      const ordered = normalized.map((msg) => ({
+        t: msg.unix_ms ?? 0,
+        from: msg.from_me ? "me" : (msg.sender || "other"),
+        text: msg.text || "",
+      }));
+      const start = ordered[0]?.t;
+      const end = ordered[ordered.length - 1]?.t;
+      const participants = Array.from(new Set(ordered.map((r) => r.from)));
+      const counts = ordered.reduce((acc: Record<string, number>, r) => {
+        acc[r.from] = (acc[r.from] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+      const summary = `Window: ${start ? new Date(start).toISOString() : ""} → ${end ? new Date(end).toISOString() : ""} | Participants: ${participants.join(', ')} | Counts: ${Object.entries(counts).map(([k,v])=>k+': '+v).join(', ')}`;
+      const lines: string[] = [];
+      for (const r of ordered) {
+        const stamp = new Date(r.t).toLocaleString('en-US', { hour12: false });
+        const line = `${stamp} ${r.from}: ${r.text}`;
+        lines.push(line);
+      }
+      // Trim to max_chars
+      let out: string[] = [];
+      let used = 0;
+      for (const l of lines) {
+        if (used + l.length + 1 > max_chars) break;
+        out.push(l); used += l.length + 1;
+      }
+      return {
+        content: textContent(summary + "\n" + out.join("\n")),
+        structuredContent: { summary, lines: out },
+      };
+    }
+  );
+  return server;
+}
+
+type HttpLaunchOptions = {
+  mode: "http";
+  port: number;
+  host: string;
+  enableSseFallback: boolean;
+  corsOrigins: string[];
+  dnsRebindingProtection: boolean;
+  allowedHosts: string[];
+};
+
+type LaunchOptions = { mode: "stdio" } | HttpLaunchOptions;
+
+function parseLaunchOptions(): LaunchOptions {
+  const args = process.argv.slice(2);
+  let mode: "stdio" | "http" = parseEnvBool("MESSAGES_MCP_HTTP", false) || process.env.MESSAGES_MCP_HTTP_PORT ? "http" : "stdio";
+  let port = parsePort(process.env.MESSAGES_MCP_HTTP_PORT, 3000);
+  let host = (process.env.MESSAGES_MCP_HTTP_HOST || "0.0.0.0").trim() || "0.0.0.0";
+  let enableSseFallback = parseEnvBool("MESSAGES_MCP_HTTP_ENABLE_SSE", false);
+  let dnsRebindingProtection = parseEnvBool("MESSAGES_MCP_HTTP_DNS_PROTECTION", false);
+  let allowedHosts = parseCsv(process.env.MESSAGES_MCP_HTTP_ALLOWED_HOSTS);
+  let corsOrigins = parseCsv(process.env.MESSAGES_MCP_HTTP_CORS_ORIGINS);
+  if (!corsOrigins.length) corsOrigins = ["*"];
+
+  const takeValue = (index: number): string | undefined => {
+    const value = args[index + 1];
+    return typeof value === "string" ? value : undefined;
+  };
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--http") {
+      mode = "http";
+      continue;
+    }
+    if (arg === "--stdio") {
+      mode = "stdio";
+      continue;
+    }
+    if (arg === "--port") {
+      const value = takeValue(i);
+      if (value) {
+        port = parsePort(value, port);
+        i++;
+        mode = "http";
+      }
+      continue;
+    }
+    if (arg.startsWith("--port=")) {
+      port = parsePort(arg.split("=", 2)[1], port);
+      mode = "http";
+      continue;
+    }
+    if (arg === "--host") {
+      const value = takeValue(i);
+      if (value) {
+        host = value;
+        i++;
+        mode = "http";
+      }
+      continue;
+    }
+    if (arg.startsWith("--host=")) {
+      host = arg.split("=", 2)[1];
+      mode = "http";
+      continue;
+    }
+    if (arg === "--enable-sse" || arg === "--sse") {
+      enableSseFallback = true;
+      continue;
+    }
+    if (arg === "--disable-sse") {
+      enableSseFallback = false;
+      continue;
+    }
+    if (arg === "--cors-origin") {
+      const value = takeValue(i);
+      if (value) {
+        corsOrigins = value === "*" ? ["*"] : [...new Set([...corsOrigins.filter((o) => o !== "*"), value])];
+        i++;
+      }
+      continue;
+    }
+    if (arg.startsWith("--cors-origin=")) {
+      const value = arg.split("=", 2)[1];
+      corsOrigins = value === "*" ? ["*"] : [...new Set([...corsOrigins.filter((o) => o !== "*"), value])];
+      continue;
+    }
+    if (arg === "--enable-dns-protection") {
+      dnsRebindingProtection = true;
+      continue;
+    }
+    if (arg === "--disable-dns-protection") {
+      dnsRebindingProtection = false;
+      continue;
+    }
+    if (arg === "--allowed-host") {
+      const value = takeValue(i);
+      if (value) {
+        allowedHosts = [...new Set([...allowedHosts, value])];
+        i++;
+      }
+      continue;
+    }
+    if (arg.startsWith("--allowed-host=")) {
+      const value = arg.split("=", 2)[1];
+      allowedHosts = [...new Set([...allowedHosts, value])];
+      continue;
     }
   }
-);
 
-// summarize_window tool
-server.registerTool(
-  "summarize_window",
-  {
-    description: "Summarize a small window around an anchor message (by rowid) for low-token analysis.",
-    inputSchema: {
-      message_rowid: z.number().int(),
-      before: z.number().int().min(0).max(200).default(50),
-      after: z.number().int().min(0).max(200).default(50),
-      max_chars: z.number().int().min(200).max(20000).default(2000),
-    },
-    outputSchema: {
-      summary: z.string(),
-      lines: z.array(z.string()),
-    }
-  },
-  async ({ message_rowid, before, after, max_chars }) => {
-    const rows = await contextAroundMessage(message_rowid, before, after, false);
-    const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
-    const ordered = normalized.map((msg) => ({
-      t: msg.unix_ms ?? 0,
-      from: msg.from_me ? "me" : (msg.sender || "other"),
-      text: msg.text || "",
-    }));
-    const start = ordered[0]?.t;
-    const end = ordered[ordered.length - 1]?.t;
-    const participants = Array.from(new Set(ordered.map((r) => r.from)));
-    const counts = ordered.reduce((acc: Record<string, number>, r) => {
-      acc[r.from] = (acc[r.from] || 0) + 1;
-      return acc;
-    }, {} as Record<string, number>);
-    const summary = `Window: ${start ? new Date(start).toISOString() : ""} → ${end ? new Date(end).toISOString() : ""} | Participants: ${participants.join(', ')} | Counts: ${Object.entries(counts).map(([k,v])=>k+': '+v).join(', ')}`;
-    const lines: string[] = [];
-    for (const r of ordered) {
-      const stamp = new Date(r.t).toLocaleString('en-US', { hour12: false });
-      const line = `${stamp} ${r.from}: ${r.text}`;
-      lines.push(line);
-    }
-    // Trim to max_chars
-    let out: string[] = [];
-    let used = 0;
-    for (const l of lines) {
-      if (used + l.length + 1 > max_chars) break;
-      out.push(l); used += l.length + 1;
-    }
+  if (mode === "http") {
     return {
-      content: textContent(summary + "\n" + out.join("\n")),
-      structuredContent: { summary, lines: out },
+      mode: "http",
+      port,
+      host,
+      enableSseFallback,
+      corsOrigins,
+      dnsRebindingProtection,
+      allowedHosts,
     };
   }
-);
+
+  return { mode: "stdio" };
+}
+
+async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
+  const app = express();
+  app.use(express.json({ limit: "1mb" }));
+  if (options.corsOrigins.length) {
+    const originSetting = options.corsOrigins.length === 1 && options.corsOrigins[0] === "*" ? "*" : options.corsOrigins;
+    app.use(cors({
+      origin: originSetting,
+      exposedHeaders: ["Mcp-Session-Id"],
+      allowedHeaders: ["Content-Type", "mcp-session-id"],
+    }));
+  }
+
+  const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: McpServer }>();
+  const legacySessions = new Map<string, { transport: SSEServerTransport; server: McpServer }>();
+
+  app.get("/health", (_req: Request, res: Response) => {
+    res.json({ ok: true });
+  });
+
+  app.post("/mcp", async (req: Request, res: Response) => {
+    try {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      if (sessionId && sessions.has(sessionId)) {
+        const entry = sessions.get(sessionId)!;
+        await entry.transport.handleRequest(req, res, req.body);
+        return;
+      }
+
+      if (!sessionId && isInitializeRequest(req.body)) {
+        const server = createConfiguredServer();
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (newSessionId) => {
+            sessions.set(newSessionId, { transport, server });
+          },
+          enableDnsRebindingProtection: options.dnsRebindingProtection,
+          allowedHosts: options.allowedHosts.length ? options.allowedHosts : undefined,
+        });
+        transport.onclose = () => {
+          const id = transport.sessionId;
+          if (id) {
+            sessions.delete(id);
+          }
+          server.close().catch(() => {});
+        };
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+        return;
+      }
+
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32000,
+          message: "Bad Request: No valid session ID provided",
+        },
+        id: null,
+      });
+    } catch (error) {
+      console.error("HTTP transport error:", error);
+      res.status(500).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32001,
+          message: "Internal Server Error",
+        },
+        id: null,
+      });
+    }
+  });
+
+  const handleSessionRequest = async (req: Request, res: Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    if (!sessionId || !sessions.has(sessionId)) {
+      res.status(400).send("Invalid or missing session ID");
+      return;
+    }
+    const entry = sessions.get(sessionId)!;
+    await entry.transport.handleRequest(req, res);
+  };
+
+  app.get("/mcp", handleSessionRequest);
+  app.delete("/mcp", handleSessionRequest);
+
+  if (options.enableSseFallback) {
+    app.get("/sse", async (_req: Request, res: Response) => {
+      const transport = new SSEServerTransport("/messages", res);
+      const server = createConfiguredServer();
+      legacySessions.set(transport.sessionId, { transport, server });
+      res.on("close", () => {
+        legacySessions.delete(transport.sessionId);
+        server.close().catch(() => {});
+      });
+      await server.connect(transport);
+    });
+
+    app.post("/messages", async (req: Request, res: Response) => {
+      const sessionId = req.query.sessionId as string | undefined;
+      if (!sessionId || !legacySessions.has(sessionId)) {
+        res.status(400).send("No transport found for sessionId");
+        return;
+      }
+      const entry = legacySessions.get(sessionId)!;
+      await entry.transport.handlePostMessage(req, res, req.body);
+    });
+  }
+
+  return new Promise<void>((resolve) => {
+    app.listen(options.port, options.host, () => {
+      console.log(`messages.app-mcp HTTP server listening on http://${options.host}:${options.port}`);
+      if (options.enableSseFallback) {
+        console.log("Legacy SSE fallback enabled at /sse");
+      }
+      resolve();
+    });
+  });
+}
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  const launch = parseLaunchOptions();
+  if (launch.mode === "stdio") {
+    const server = createConfiguredServer();
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    return;
+  }
+
+  await runHttpServer(launch);
 }
 
 main().catch((err) => {

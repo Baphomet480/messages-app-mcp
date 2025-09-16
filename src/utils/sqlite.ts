@@ -2,6 +2,14 @@ import { execFile } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promises as fs } from "node:fs";
+import { parseAttributedBody } from "imessage-parser";
+import type {
+  AttachmentAttribute,
+  DataDetectorAttribute,
+  LinkAttribute,
+  MentionAttribute,
+  ParsedMessage,
+} from "imessage-parser";
 
 export type ChatRow = {
   chat_id: number;
@@ -41,6 +49,43 @@ export type EnrichedMessageRow = MessageRow & {
   body_hex?: string | null;
   decoded_text?: string | null;
   attachments_meta?: { name: string; mime: string; filename: string }[];
+  attributed_body_meta?: ParsedAttributedBody | null;
+};
+
+export type RangeInfo = {
+  location: number;
+  length: number;
+};
+
+export type AttributedAttachmentHint = RangeInfo & {
+  guid: string;
+  type: string;
+  filename?: string | null;
+  mimeType?: string | null;
+};
+
+export type MentionInfo = RangeInfo & {
+  handle: string;
+};
+
+export type LinkInfo = RangeInfo & {
+  url: string;
+};
+
+export type DataDetectorInfo = RangeInfo & {
+  detectorType: DataDetectorAttribute["type"];
+  value: string;
+  metadata?: unknown;
+};
+
+export type ParsedAttributedBody = {
+  text: string | null;
+  textSource: "parser" | "legacy" | "none";
+  link: string | null;
+  attachments: AttributedAttachmentHint[];
+  mentions: MentionInfo[];
+  links: LinkInfo[];
+  dataDetectors: DataDetectorInfo[];
 };
 
 export type AttachmentInfo = {
@@ -78,47 +123,133 @@ async function runSqliteJSON(dbPath: string, sql: string): Promise<any[]> {
   });
 }
 
-const attributedBodyCache = new Map<string, string | null>();
+const attributedBodyCache = new Map<string, ParsedAttributedBody | null>();
 
-async function decodeAttributedBodyHexToText(hex: string): Promise<string | null> {
+async function decodeAttributedBodyHexLegacy(hex: string): Promise<string | null> {
   if (!hex) return null;
-  const cached = attributedBodyCache.get(hex);
-  if (cached !== undefined) return cached;
   try {
-    const buf = Buffer.from(hex, 'hex');
-    const dir = await fs.mkdtemp(join(tmpdir(), 'msgmcp-'));
-    const inPath = join(dir, 'body.bplist');
+    const buf = Buffer.from(hex, "hex");
+    const dir = await fs.mkdtemp(join(tmpdir(), "msgmcp-"));
+    const inPath = join(dir, "body.bplist");
     await fs.writeFile(inPath, buf);
-    // Convert NSKeyedArchive plist to JSON
     const json = await new Promise<string>((resolve, reject) => {
-      execFile('/usr/bin/plutil', ['-convert', 'json', '-o', '-', inPath], { timeout: 5000, maxBuffer: 10*1024*1024 }, (err, stdout, stderr) => {
-        if (err) return reject(new Error(stderr || err.message));
-        resolve(stdout.toString());
-      });
+      execFile(
+        "/usr/bin/plutil",
+        ["-convert", "json", "-o", "-", inPath],
+        { timeout: 5000, maxBuffer: 10 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          if (err) return reject(new Error(stderr || err.message));
+          resolve(stdout.toString());
+        },
+      );
     });
-    try { await fs.rm(dir, { recursive: true, force: true }); } catch {}
+    try {
+      await fs.rm(dir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup error
+    }
     const data = JSON.parse(json);
-    // Heuristic: walk JSON to collect plausible string fragments
     const strings: string[] = [];
     const visit = (node: any) => {
       if (!node) return;
-      if (typeof node === 'string') {
+      if (typeof node === "string") {
         const s = node.trim();
         if (s.length >= 1 && /[\p{L}\p{N}]/u.test(s)) strings.push(s);
         return;
       }
-      if (Array.isArray(node)) { for (const v of node) visit(v); return; }
-      if (typeof node === 'object') { for (const k of Object.keys(node)) visit(node[k]); return; }
+      if (Array.isArray(node)) {
+        for (const v of node) visit(v);
+        return;
+      }
+      if (typeof node === "object") {
+        for (const key of Object.keys(node)) visit((node as Record<string, unknown>)[key]);
+        return;
+      }
     };
     visit(data);
-    // Pick the longest reasonable string as message text
-    const sorted = strings.sort((a,b) => b.length - a.length);
-    const candidate = sorted[0] || null;
-    attributedBodyCache.set(hex, candidate);
-    return candidate;
+    const sorted = strings.sort((a, b) => b.length - a.length);
+    return sorted[0] || null;
   } catch {
-    attributedBodyCache.set(hex, null);
     return null;
+  }
+}
+
+function convertParsedMessage(parsed: ParsedMessage): ParsedAttributedBody {
+  const text = parsed.text?.trim().length ? parsed.text : null;
+  const textSource: ParsedAttributedBody["textSource"] = text ? "parser" : "none";
+  const attachments: AttributedAttachmentHint[] = (parsed.attributes?.attachments || []).map((att: AttachmentAttribute) => ({
+    guid: att.guid,
+    type: att.type,
+    filename: att.filename ?? null,
+    mimeType: att.mimeType ?? null,
+    location: att.location,
+    length: att.length,
+  }));
+  const mentions: MentionInfo[] = (parsed.attributes?.mentions || []).map((mention: MentionAttribute) => ({
+    handle: mention.handle,
+    location: mention.location,
+    length: mention.length,
+  }));
+  const links: LinkInfo[] = (parsed.attributes?.links || []).map((link: LinkAttribute) => ({
+    url: link.url,
+    location: link.location,
+    length: link.length,
+  }));
+  const dataDetectors: DataDetectorInfo[] = (parsed.attributes?.dataDetectors || []).map((det: DataDetectorAttribute) => ({
+    detectorType: det.type,
+    value: det.value,
+    metadata: det.metadata,
+    location: det.location,
+    length: det.length,
+  }));
+  return {
+    text,
+    textSource,
+    link: parsed.link || null,
+    attachments,
+    mentions,
+    links,
+    dataDetectors,
+  };
+}
+
+async function decodeAttributedBody(hex: string): Promise<ParsedAttributedBody | null> {
+  if (!hex) return null;
+  const cached = attributedBodyCache.get(hex);
+  if (cached !== undefined) return cached;
+
+  const setCache = (value: ParsedAttributedBody | null) => {
+    attributedBodyCache.set(hex, value);
+    return value;
+  };
+
+  try {
+    const buffer = Buffer.from(hex, "hex");
+    const parsedMessage = convertParsedMessage(
+      parseAttributedBody(buffer, { cleanOutput: true, includeMetadata: true }),
+    );
+    if (!parsedMessage.text || parsedMessage.text.trim().length === 0) {
+      const legacy = await decodeAttributedBodyHexLegacy(hex);
+      if (legacy && legacy.trim().length > 0) {
+        parsedMessage.text = legacy;
+        parsedMessage.textSource = parsedMessage.textSource === "parser" ? "parser" : "legacy";
+      }
+    }
+    return setCache(parsedMessage);
+  } catch {
+    const fallback = await decodeAttributedBodyHexLegacy(hex);
+    if (fallback && fallback.trim().length > 0) {
+      return setCache({
+        text: fallback,
+        textSource: "legacy",
+        link: null,
+        attachments: [],
+        mentions: [],
+        links: [],
+        dataDetectors: [],
+      });
+    }
+    return setCache(null);
   }
 }
 
@@ -306,15 +437,34 @@ function parseAttachmentConcat(value: string | null | undefined, cap = 5): { nam
   return out;
 }
 
-async function hydrateDecodedText(rows: Array<{ text: string | null; body_hex?: string | null; decoded_text?: string | null }>): Promise<void> {
+async function hydrateAttributedBodies(rows: EnrichedMessageRow[]): Promise<void> {
   const tasks: Array<Promise<void>> = [];
   for (const row of rows) {
-    if (row.text && row.text.trim().length > 0) continue;
     if (!row.body_hex) continue;
     tasks.push((async () => {
-      const decoded = await decodeAttributedBodyHexToText(row.body_hex!);
-      if (decoded && decoded.trim().length > 0) {
-        row.decoded_text = decoded;
+      const parsed = await decodeAttributedBody(row.body_hex!);
+      if (!parsed) return;
+      row.attributed_body_meta = parsed;
+      const parsedText = parsed.text?.trim() ?? "";
+      if ((!row.text || row.text.trim().length === 0) && parsedText.length > 0) {
+        row.decoded_text = parsed.text;
+      }
+      if (parsed.attachments.length > 0) {
+        const existing = row.attachments_meta ? [...row.attachments_meta] : [];
+        for (const att of parsed.attachments) {
+          const filename = att.filename ?? "";
+          const hintName = filename || att.guid;
+          const normalized = {
+            name: hintName,
+            mime: att.mimeType ?? "",
+            filename,
+          };
+          const already = existing.find(
+            (item) => item.filename === normalized.filename && item.mime === normalized.mime,
+          );
+          if (!already) existing.push(normalized);
+        }
+        row.attachments_meta = existing;
       }
     })());
   }
@@ -393,7 +543,7 @@ export async function getMessagesByChatId(chatId: number, limit = 50): Promise<M
     LIMIT ${Math.max(1, Math.min(500, limit))};`;
 
   const rows = (await runSqliteJSON(db, sql)) as EnrichedMessageRow[];
-  await hydrateDecodedText(rows);
+  await hydrateAttributedBodies(rows);
   return rows;
 }
 
@@ -418,7 +568,7 @@ export async function getMessagesByParticipant(participant: string, limit = 50):
     LIMIT ${Math.max(1, Math.min(500, limit))};`;
 
   const rows = (await runSqliteJSON(db, sql)) as EnrichedMessageRow[];
-  await hydrateDecodedText(rows);
+  await hydrateAttributedBodies(rows);
   return rows;
 }
 
@@ -499,7 +649,7 @@ export async function searchMessages(opts: SearchOptions): Promise<(SearchMessag
     LIMIT ${limit} OFFSET ${offset};`;
 
   const rows = (await runSqliteJSON(db, sql)) as (EnrichedMessageRow & { chat_id: number; atts_concat?: string | null })[];
-  await hydrateDecodedText(rows);
+  await hydrateAttributedBodies(rows);
   if (opts.includeAttachmentsMeta) {
     for (const r of rows) {
       if ((r as any).atts_concat) {
@@ -526,7 +676,7 @@ export async function searchMessages(opts: SearchOptions): Promise<(SearchMessag
         ORDER BY m.date DESC
         LIMIT ${Math.min(500, need * 10)} OFFSET 0;`;
       const richRows = await runSqliteJSON(db, richSql) as (EnrichedMessageRow & { chat_id: number; body_hex?: string | null; atts_concat?: string | null })[];
-      await hydrateDecodedText(richRows);
+      await hydrateAttributedBodies(richRows);
       const matches: (SearchMessageRow & { decoded_text?: string | null; attachments_meta?: { name: string; mime: string; filename: string }[] })[] = [];
       for (const r of richRows) {
         const decoded = (r as any).decoded_text;
@@ -584,7 +734,7 @@ export async function contextAroundMessage(messageRowId: number, before = 10, af
     ORDER BY m.date ASC
     LIMIT ${Math.max(0, after)};`) as (EnrichedMessageRow & { chat_id: number; atts_concat?: string | null })[];
   const combined = [...prev, ...cur, ...nxt];
-  await hydrateDecodedText(combined);
+  await hydrateAttributedBodies(combined);
   if (includeAttachmentsMeta) {
     for (const row of combined) {
       if ((row as any).atts_concat) {
@@ -595,6 +745,17 @@ export async function contextAroundMessage(messageRowId: number, before = 10, af
   }
   combined.sort((a, b) => (appleEpochToUnixMs(a.date) ?? 0) - (appleEpochToUnixMs(b.date) ?? 0));
   return combined as any;
+}
+
+export async function getChatIdByGuid(guid: string): Promise<number | null> {
+  const trimmed = guid?.trim();
+  if (!trimmed) return null;
+  const db = getChatDbPath();
+  const safeGuid = trimmed.replaceAll("'", "''");
+  const rows = await runSqliteJSON(db, `SELECT ROWID AS chat_id FROM chat WHERE guid = '${safeGuid}' LIMIT 1;`) as Array<{ chat_id: number | null }>;
+  const value = rows[0]?.chat_id;
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return value;
 }
 
 export async function getAttachmentsForMessages(messageIds: number[], perMessageCap = 5): Promise<AttachmentInfo[]> {

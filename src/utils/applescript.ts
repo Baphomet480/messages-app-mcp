@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { resolve as resolvePath, isAbsolute } from "node:path";
+import { stat } from "node:fs/promises";
 
 export function runAppleScriptInline(script: string, args: string[] = []): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -15,16 +18,91 @@ export function runAppleScriptInline(script: string, args: string[] = []): Promi
   });
 }
 
-export async function sendMessageAppleScript(recipient: string, text: string): Promise<void> {
-  // AppleScript attempts multiple strategies for better reliability across macOS versions:
-  // 1) Use existing chat if found
-  // 2) Send to buddy on a service
-  // 3) Create a new text chat
-  const script = `
+type TargetMode = "recipient" | "chat";
+
+export type SendTarget = {
+  recipient?: string;
+  chatGuid?: string;
+  chatName?: string;
+};
+
+const SEND_PAYLOAD_SCRIPT = `
 on run argv
-  if (count of argv) < 2 then error "Missing args"
-  set theRecipient to item 1 of argv
-  set theText to item 2 of argv
+  if (count of argv) < 4 then error "Missing arguments"
+  set payloadKind to item 1 of argv
+  set targetMode to item 2 of argv
+  set targetValue to item 3 of argv
+  set payloadValue to item 4 of argv
+  set captionText to ""
+  if payloadKind is "file" then
+    if (count of argv) >= 5 then set captionText to item 5 of argv
+  end if
+
+  if targetMode is not in {"recipient", "chat"} then error "Invalid target mode"
+  if payloadKind is not in {"text", "file"} then error "Invalid payload kind"
+
+  set theFile to missing value
+  if payloadKind is "file" then
+    set theFile to POSIX file payloadValue
+  end if
+
+  tell application "Messages"
+    with timeout of 30 seconds
+      set theTarget to missing value
+      if targetMode is "chat" then
+        set theTarget to my locateChat(targetValue)
+      else
+        set theTarget to my locateRecipient(targetValue)
+      end if
+
+      if theTarget is missing value then
+        if targetMode is "chat" then
+          error "Unable to find chat with provided identifier."
+        else
+          error "Unable to resolve recipient; no account can send to this target."
+        end if
+      end if
+
+      if payloadKind is "text" then
+        send payloadValue to theTarget
+      else if payloadKind is "file" then
+        if captionText is not "" then
+          try
+            send captionText to theTarget
+            delay 0.2
+          end try
+        end if
+        send theFile to theTarget
+      else
+        error "Unsupported payload kind"
+      end if
+    end timeout
+  end tell
+end run
+
+on locateChat(chatKey)
+  if chatKey is missing value or chatKey is "" then return missing value
+  tell application "Messages"
+    try
+      set directChat to chat id chatKey
+      return directChat
+    end try
+    repeat with existingChat in chats
+      try
+        if (id of existingChat as string) is chatKey then return existingChat
+      end try
+    end repeat
+    repeat with existingChat in chats
+      try
+        if (name of existingChat as string) is chatKey then return existingChat
+      end try
+    end repeat
+  end tell
+  return missing value
+end locateChat
+
+on locateRecipient(theRecipient)
+  if theRecipient is missing value or theRecipient is "" then return missing value
 
   set isEmail to false
   set looksPhone to false
@@ -60,7 +138,6 @@ on run argv
       error "No Messages services available. Sign in to iMessage or enable Text Message Forwarding on your iPhone."
     end if
 
-    -- Build a candidate list honoring the recipient shape
     set candidates to {}
     if isEmail then
       if imService is missing value then
@@ -75,98 +152,155 @@ on run argv
       if smsService is not missing value then set end of candidates to smsService
     end if
 
-    with timeout of 25 seconds
-      -- Strategy A: try existing chats first (faster and more reliable on some systems)
-      repeat with svc in candidates
-        try
-          -- Avoid 'text chat' token to sidestep parser quirks on some systems
-          set existingChats to (every chat whose service is svc)
-          repeat with c in existingChats
-            set parts to {}
-            try
-              set parts to participants of c
-            end try
-            if parts contains theRecipient then
-              try
-                send theText to c
-                return "OK"
-              end try
-            end if
-          end repeat
-        end try
+    set acctCandidates to {}
+    if isEmail then
+      repeat with ac in imAccounts
+        set end of acctCandidates to ac
       end repeat
+    else if looksPhone then
+      repeat with ac in imAccounts
+        set end of acctCandidates to ac
+      end repeat
+      repeat with ac in smsAccounts
+        set end of acctCandidates to ac
+      end repeat
+    else
+      repeat with ac in imAccounts
+        set end of acctCandidates to ac
+      end repeat
+      repeat with ac in smsAccounts
+        set end of acctCandidates to ac
+      end repeat
+    end if
 
-      -- Strategy B: participant-based send via account (Big Sur+)
-      if (count of imAccounts) > 0 or (count of smsAccounts) > 0 then
-        set acctCandidates to {}
-        if isEmail then
-          repeat with ac in imAccounts
-            set end of acctCandidates to ac
-          end repeat
-        else if looksPhone then
-          repeat with ac in imAccounts
-            set end of acctCandidates to ac
-          end repeat
-          repeat with ac in smsAccounts
-            set end of acctCandidates to ac
-          end repeat
-        else
-          repeat with ac in imAccounts
-            set end of acctCandidates to ac
-          end repeat
-          repeat with ac in smsAccounts
-            set end of acctCandidates to ac
-          end repeat
-        end if
-
-        repeat with ac in acctCandidates
+    repeat with svc in candidates
+      try
+        set existingChats to (every chat whose service is svc)
+        repeat with c in existingChats
+          set parts to {}
           try
-            set theParticipant to participant id theRecipient of ac
-            send theText to theParticipant
-            return "OK"
+            set parts to participants of c
           end try
+          if parts contains theRecipient then return c
         end repeat
-      end if
+      end try
+    end repeat
 
-      -- Strategy C: participant-based send via service
-      repeat with svc in candidates
-        try
-          set theParticipant2 to participant id theRecipient of svc
-          send theText to theParticipant2
-          return "OK"
-        end try
-      end repeat
+    repeat with ac in acctCandidates
+      try
+        set theParticipant to participant id theRecipient of ac
+        return theParticipant
+      end try
+    end repeat
 
-      -- Strategy D: buddy-based send (older)
-      repeat with svc in candidates
-        try
-          set theBuddy to buddy id theRecipient of svc
-          send theText to theBuddy
-          return "OK"
-        end try
-      end repeat
+    repeat with svc in candidates
+      try
+        set theParticipant2 to participant id theRecipient of svc
+        return theParticipant2
+      end try
+    end repeat
 
-      -- Strategy E: create a new text chat
-      repeat with svc in candidates
-        try
-          set theChat to make new text chat with properties {service:svc, participants:{theRecipient}}
-          -- Sometimes the chat object needs a short delay to settle
-          delay 0.2
-          send theText to theChat
-          return "OK"
-        end try
-      end repeat
+    repeat with svc in candidates
+      try
+        set theBuddy to buddy id theRecipient of svc
+        return theBuddy
+      end try
+    end repeat
 
-      if isEmail then
-        error "Unable to send via iMessage to email recipient. Verify the address is registered with iMessage."
-      else if looksPhone then
-        error "Unable to send via iMessage or SMS. If the number is not on iMessage, enable Text Message Forwarding for this Mac on your iPhone and try again."
-      else
-        error "Unable to send: no chat or buddy could be created for this recipient."
-      end if
-    end timeout
+    repeat with svc in candidates
+      try
+        set theChat to make new text chat with properties {service:svc, participants:{theRecipient}}
+        delay 0.2
+        return theChat
+      end try
+    end repeat
   end tell
-end run`;
 
-  await runAppleScriptInline(script, [recipient, text]);
+  return missing value
+end locateRecipient
+`;
+
+function resolveSendTarget(target: string | SendTarget): { mode: TargetMode; value: string } {
+  if (typeof target === "string") {
+    const trimmed = target.trim();
+    if (!trimmed) throw new Error("Recipient cannot be empty.");
+    return { mode: "recipient", value: trimmed };
+  }
+  if (target.chatGuid && target.chatGuid.trim()) {
+    return { mode: "chat", value: target.chatGuid.trim() };
+  }
+  if (target.chatName && target.chatName.trim()) {
+    return { mode: "chat", value: target.chatName.trim() };
+  }
+  if (target.recipient && target.recipient.trim()) {
+    return { mode: "recipient", value: target.recipient.trim() };
+  }
+  throw new Error("A recipient, chatGuid, or chatName is required.");
+}
+
+async function runSendPayload(
+  payloadKind: "text" | "file",
+  target: string | SendTarget,
+  payload: string,
+  caption?: string,
+): Promise<void> {
+  const { mode, value } = resolveSendTarget(target);
+  const args = [payloadKind, mode, value, payload];
+  if (payloadKind === "file" && caption && caption.trim().length > 0) {
+    args.push(caption);
+  }
+  await runAppleScriptInline(SEND_PAYLOAD_SCRIPT, args);
+}
+
+export async function sendMessageAppleScript(target: string | SendTarget, text: string): Promise<void> {
+  if (!text || text.trim().length === 0) {
+    throw new Error("Message text must not be empty.");
+  }
+  await runSendPayload("text", target, text);
+}
+
+function expandUserPath(rawPath: string): string {
+  if (rawPath === "~") return homedir();
+  if (rawPath.startsWith("~/")) return resolvePath(homedir(), rawPath.slice(2));
+  if (rawPath.startsWith("~")) return resolvePath(homedir(), rawPath.slice(1));
+  return rawPath;
+}
+
+async function normalizeAttachmentPath(filePath: string): Promise<string> {
+  if (!filePath || filePath.trim().length === 0) {
+    throw new Error("Attachment path must not be empty.");
+  }
+  const expanded = expandUserPath(filePath.trim());
+  const absolute = isAbsolute(expanded) ? expanded : resolvePath(expanded);
+  try {
+    const stats = await stat(absolute);
+    if (!stats.isFile()) {
+      throw new Error(`Attachment path is not a file: ${absolute}`);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`Attachment not found at ${absolute}. Ensure the file exists and this process has Full Disk Access.`);
+    }
+    throw err;
+  }
+  return absolute;
+}
+
+export const MESSAGES_FDA_HINT = "Messages needs Full Disk Access (System Settings → Privacy & Security → Full Disk Access) to send attachments from arbitrary folders.";
+
+export async function sendAttachmentAppleScript(
+  target: string | SendTarget,
+  filePath: string,
+  caption?: string,
+): Promise<void> {
+  const normalizedPath = await normalizeAttachmentPath(filePath);
+  try {
+    await runSendPayload("file", target, normalizedPath, caption);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/POSIX file/.test(message) || /\(-1728\)/.test(message)) {
+      throw new Error(MESSAGES_FDA_HINT);
+    }
+    throw err;
+  }
 }

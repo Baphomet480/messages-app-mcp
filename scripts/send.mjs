@@ -71,7 +71,7 @@ async function main() {
   }
 
   try {
-    await sendMessageAppleScript(recipient, text)
+    await sendMessageAppleScript({ recipient }, text)
     console.log(`Sent to ${mask ? maskRecipient(recipient) : recipient}.`)
   } catch (e) {
     console.error(`Failed to send to ${mask ? maskRecipient(recipient) : recipient}. ${cleanOsaError(e)}`)
