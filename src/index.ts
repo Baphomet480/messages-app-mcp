@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
 import express, { type Request, type Response } from "express";
 import cors from "cors";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -8,7 +9,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { sendMessageAppleScript, sendAttachmentAppleScript, type SendTarget } from "./utils/applescript.js";
+import { sendMessageAppleScript, sendAttachmentAppleScript, MESSAGES_FDA_HINT, type SendTarget } from "./utils/applescript.js";
 import { listChats, getMessagesByChatId, getMessagesByParticipant, appleEpochToUnixMs, searchMessages, contextAroundMessage, getAttachmentsForMessages, getChatIdByGuid } from "./utils/sqlite.js";
 import { runDoctor } from "./utils/doctor.js";
 import type { EnrichedMessageRow, AttachmentInfo } from "./utils/sqlite.js";
@@ -473,20 +474,49 @@ function createConfiguredServer(): McpServer {
       "send_attachment",
       "Send an attachment via Messages.app to a recipient or existing chat.",
       sendAttachmentInputSchema,
-      async () => ({
-        content: textContent("Attachment sending is temporarily disabled while we stabilize delivery."),
-        isError: true,
-      })
+      async ({ recipient, chat_guid, chat_name }) => {
+        const base = { recipient, chat_guid, chat_name };
+        if (!hasTarget(base)) {
+          return {
+            content: textContent("Missing target. Provide recipient, chat_guid, or chat_name."),
+            isError: true,
+          };
+        }
+        const shown = describeSendTarget(base);
+        return {
+          content: textContent(`Read-only mode is enabled; did not send attachment to ${shown}.`),
+          isError: true,
+        };
+      }
     );
   } else {
     server.tool(
       "send_attachment",
       "Send an attachment via Messages.app to a recipient or existing chat.",
       sendAttachmentInputSchema,
-      async () => ({
-        content: textContent("Attachment sending is temporarily disabled while we stabilize delivery."),
-        isError: true,
-      })
+      async ({ recipient, chat_guid, chat_name, file_path, caption }) => {
+        try {
+          const base = { recipient, chat_guid, chat_name };
+          const target = buildSendTarget(base);
+          await sendAttachmentAppleScript(target, file_path, caption);
+          const shown = describeSendTarget(base);
+          const trimmedPath = file_path?.trim?.() ?? file_path;
+          const fileLabel = trimmedPath ? basename(trimmedPath) : null;
+          const labelSegment = fileLabel ? `"${fileLabel}" ` : "";
+          return { content: textContent(`Sent attachment ${labelSegment}to ${shown}.`) };
+        } catch (e) {
+          const base = { recipient, chat_guid, chat_name };
+          const shown = hasTarget(base) ? describeSendTarget(base) : "target";
+          const reason =
+            e instanceof Error && e.message === MESSAGES_FDA_HINT
+              ? e.message
+              : cleanOsaError(e);
+          return {
+            content: textContent(`Failed to send attachment to ${shown}. ${reason}`),
+            isError: true,
+          };
+        }
+      }
     );
   }
 
