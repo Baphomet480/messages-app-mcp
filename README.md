@@ -1,133 +1,122 @@
-**Messages.app MCP Server**
+# Messages.app MCP Server
 
-This repository provides a Model Context Protocol (MCP) server that lets AI clients interact with the macOS Messages.app: list chats, read recent messages (read‑only), and send new messages.
+A Model Context Protocol (MCP) server that lets AI assistants interact with macOS Messages.app—listing chats, reading conversation history (read only), and sending new iMessage/SMS content on demand.
 
-Features
-- List recent chats with participants (from `~/Library/Messages/chat.db`).
-- Get recent messages for a chat or participant.
-- Send messages via AppleScript (iMessage/SMS) by recipient, chat GUID, or Messages display name.
-- Send attachments with optional captions using the same targeting options as `send_text`.
-- Decode `attributedBody` typedstreams via `imessage-parser` to recover formatted text, mentions, and attachment hints.
-- Search messages by text with optional scoping and filters; results include ISO timestamps and message-type hints.
-- Pull focused context windows around a specific message to minimize tokens.
-- Fetch attachment metadata and resolved file paths on demand with strict per-message caps.
-- Generate AppleScript handler templates for incoming/outgoing events to “push” notifications into other tools.
-- Opt-in read-only mode to disable `send_text`/`send_attachment` when you only need to browse history.
-- Optional HTTP transport (Streamable HTTP with legacy SSE fallback) for remote MCP connectors like ChatGPT Pro / Deep Research.
-- Connector-friendly `search` / `fetch` tools that emit JSON strings exactly as the MCP spec expects for remote integrations.
+## Table of Contents
+- [Overview](#overview)
+- [Key Features](#key-features)
+- [Requirements](#requirements)
+- [Quick Start](#quick-start)
+- [Tool Reference](#tool-reference)
+- [Configuration](#configuration)
+- [Versioning & Support](#versioning--support)
+- [Development](#development)
+- [Testing](#testing)
+- [Release Process](#release-process)
+- [Security Notes](#security-notes)
+- [Contributing](#contributing)
+- [License](#license)
 
-Requirements
-- macOS with Messages.app set up.
-- Node.js 18+.
-- Grant Full Disk Access to your terminal app (or the process running the server) so it can read `~/Library/Messages/chat.db`.
+## Overview
 
-Install
-- `npm install`
-- `npm run build`
+`messages.app-mcp` exposes Messages.app over MCP transports (stdio and optional Streamable HTTP). The server is designed for local use: it reads `~/Library/Messages/chat.db` in read-only mode and delegates outgoing sends to AppleScript.
 
-Run
-- `npm start` (stdio MCP server)
-- HTTP / connector mode: `node dist/index.js --http --port 3333 --cors-origin https://chat.openai.com`
-  - Sets up Streamable HTTP endpoints at `/mcp` with optional SSE fallback (add `--enable-sse` if you need legacy clients).
-  - Provide an externally reachable hostname (e.g., behind a reverse proxy) and expose the `Mcp-Session-Id` header.
-  - Set `MESSAGES_MCP_CONNECTOR_BASE_URL=https://your-domain.example/mcp` so the new `search`/`fetch` tools return URLs that match your deployment.
+## Key Features
 
-CLI
-- After `npm run build`, a `messages-mcp` binary is available: `npx messages-mcp` or `./node_modules/.bin/messages-mcp`.
-- Quick send helper: `npm run send -- "+1XXXXXXXXXX" "Hello"`
-  - Default output shows full recipient; use `--mask` to mask locally.
-  - The repo `.gitignore` excludes `*.log`; avoid committing any logs containing phone numbers/emails.
- - Environment check: `npm run doctor` or `npm run doctor -- --json`
-   - Verifies AppleScript availability, Messages services/accounts (iMessage/SMS), and read access to `chat.db`.
-   - Exits with non‑zero status if checks fail.
+- Enumerate recent chats with unread counts that work across macOS schema changes.
+- Fetch recent messages by chat, participant, or focused context windows with normalized timestamps/metadata.
+- Send messages and attachments while receiving structured JSON responses that include delivery summaries and recent history.
+- Full-text search with optional scoping and attachment hints.
+- Diagnostics via `doctor` and version metadata via the `about` tool.
 
-Integrate (Claude Desktop example)
-- Add to `claude_desktop_config.json` under `mcpServers`:
-  {
-    "messages": {
-      "command": "/absolute/path/to/messages.app-mcp/dist/index.js"
-    }
-  }
-- Or point to the Node entry with args: `{"command":"node","args":["/abs/path/dist/index.js"]}`.
+## Requirements
 
-Remote MCP (ChatGPT Pro / Deep Research)
-- Enable HTTP mode via CLI (`--http`, `--port`, `--host`) or env (`MESSAGES_MCP_HTTP_PORT`, `MESSAGES_MCP_HTTP_HOST`).
-- Default transport is Streamable HTTP at `/mcp`. Add `--enable-sse` (or `MESSAGES_MCP_HTTP_ENABLE_SSE=1`) if you need the legacy `/sse`+`/messages` endpoints.
-- CORS: set `--cors-origin https://chat.openai.com` (repeat flag to allow multiple origins) or `MESSAGES_MCP_HTTP_CORS_ORIGINS` (comma-separated). The server always exposes the `Mcp-Session-Id` header required by browser clients.
-- DNS rebinding protection: toggle with `--enable-dns-protection` / `--disable-dns-protection` or `MESSAGES_MCP_HTTP_DNS_PROTECTION` and optionally `MESSAGES_MCP_HTTP_ALLOWED_HOSTS`.
-- Tailor search defaults via `MESSAGES_MCP_CONNECTOR_DAYS_BACK` (default 30) and `MESSAGES_MCP_CONNECTOR_SEARCH_LIMIT` (default 20).
-- Set `MESSAGES_MCP_CONNECTOR_BASE_URL` to the externally visible base (e.g., `https://example.net/mcp`) so connector search results return useful citation URLs.
-- Connector tools:
-  - `search` → returns `{ "results": [ { id, title, url, snippet, metadata } ] }` as a JSON string per MCP spec.
-  - `fetch` → returns `{ id, title, text, url, metadata }` with optional context window controls (`context_before`, `context_after`).
+- macOS with Messages.app configured (and opened at least once).
+- Node.js 18 or newer (tested on Node 22 in CI).
+- Terminal/iTerm (or whichever shell runs the server) must have **Full Disk Access** to read Messages data.
 
--Inspector
-- Use the MCP Inspector to poke tools locally (Node 22+ recommended):
-  - Build first: `npm run build`
-  - Quick launch: `npx @modelcontextprotocol/inspector node dist/index.js`
-  - Or add a script: `"inspector": "npx @modelcontextprotocol/inspector node dist/index.js"` then run `npm run inspector`.
-  - In the Inspector UI, call `doctor`, `list_chats`, `get_messages`, or `send_text`.
+## Quick Start
 
--Exposed Tools
-- `list_chats({ limit?: number=50, participant?: string, updated_after_unix_ms?: number, unread_only?: boolean })`
-  - Returns chat metadata with UNIX + ISO timestamps and unread counts.
-- `get_messages({ chat_id?: number, participant?: string, limit?: number=50, context_anchor_rowid?: number, context_before?: number=10, context_after?: number=10, context_include_attachments_meta?: boolean })`
-  - Messages include best-effort text (decoding `attributedBody` when needed), ISO timestamps, message type/subtype hints, and attachment previews. Optional inline context bundle avoids an extra `context_around_message` call.
-- `send_text({ text: string, recipient?: string, chat_guid?: string, chat_name?: string })`
-  - Provide at least one target field. Targets can be people (phone/email) or existing group chats by GUID/display name.
-  - Disabled automatically when `MESSAGES_MCP_READONLY=true`.
-  - Responses are structured JSON: the `structuredContent` object (and the text fallback) include a summary, target metadata, and recent normalized message rows pulled from chat history.
-- `send_attachment({ file_path: string, caption?: string, recipient?|chat_guid?|chat_name? })`
-  - Sends files via AppleScript after optional caption delivery. Ensure Messages has Full Disk Access in System Settings; otherwise the OS may show “Not Delivered.”
-  - Read-only mode blocks this tool automatically.
-  - Returns the same structured JSON shape as `send_text` plus an `attachment` descriptor (path, resolved filename, caption).
-- `applescript_handler_template({ minimal?: boolean })`
-  - Returns a starter AppleScript with `message received`, `message sent`, and `received file transfer invitation` handlers. Save it under `~/Library/Application Scripts/com.apple.iChat/` to enable “push” style automations (AppleScript handlers still have the ~10s execution limit).
-- `search_messages({ query: string, chat_id|participant|from/to unix, ... })`
-  - Requires at least one scope filter to prevent whole-database scans. Returns structured results with snippets, timestamps, and metadata.
-- `search_messages_safe({ query: string, chat_id?|participant?|days_back?, ... })`
-  - Convenience wrapper that auto-bounds the time range.
-- `search({ query: string, chat_guid?, participant?, days_back?, limit? })`
-  - Connector-safe search that always returns a JSON-string payload with `results[]` objects containing `id`, `title`, `url`, and snippets for ChatGPT Pro / Deep Research.
-- `fetch({ id: string, context_before?: number=5, context_after?: number=5 })`
-  - Retrieves the full text (and optional context window) for a search result `id`, formatted as a JSON string with metadata and connector-friendly citation URL.
-- `context_around_message({ message_rowid: number, before?: number=10, after?: number=10, include_attachments_meta?: boolean })`
-  - Emits normalized messages with attachments metadata for the requested window.
-- `get_attachments({ message_rowids: number[], per_message_cap?: number=5 })`
-  - Resolves attachment transfer names, MIME types, byte sizes, and absolute file paths (still read-only).
-- `doctor()`
-  - Structured environment diagnostics with actionable remediation notes.
-  - Includes the current package version and git commit (if available) in the summary and structured payload.
-- `about()`
-  - Returns metadata about this MCP server, including the current version, git commit (when available), repository, and runtime environment details.
+```bash
+npm install
+npm run build
+npm start # stdio MCP server
+```
 
-Set `MESSAGES_MCP_MASK_RECIPIENTS=true` to redact phone numbers/emails in tool responses (useful when logging remotely or demoing). Leave unset to show full recipients locally.
+During development you can run `npm run dev` (ts-node) and use the MCP Inspector:
 
-Structured Output
-- For `list_chats`, `get_messages`, `send_text`, `send_attachment`, and `about`, the server now returns both:
-  - `structuredContent` validated against an `outputSchema` (for clients that support it), and
-  - a text fallback containing pretty‑printed JSON for broad compatibility.
+```bash
+npm run inspector
+```
 
-Notes
-- `imessage-parser` is used to decode `attributedBody` typedstreams, so rich-text, mentions, and attachment hints surface even when `message.text` is empty (falls back to a `plutil` heuristic if parsing fails).
-- Reading uses the system `sqlite3` CLI in read-only mode with JSON output. If you see a permissions error, grant Full Disk Access and try again.
-- Message timestamps are converted from Apple epoch to UNIX milliseconds and exposed as both UNIX + ISO strings.
-- Search prefers the plain `message.text` column but transparently decodes `attributedBody` blobs for matches when possible.
-- Attachment metadata is surfaced via `get_messages`/`context_around_message` hints; full paths remain opt-in through `get_attachments`.
-- Messages.app enforces sandbox rules for attachments. Grant Messages Full Disk Access (System Settings → Privacy & Security → Full Disk Access) so it can read files you reference via AppleScript. Without it, you’ll see “Not Delivered.”
+Helper scripts:
 
-Development
-- `npm run dev` to run from source via ts-node.
-- `npm run build` to emit `dist/` and run with `npm start`.
- - `npm run inspector` to launch MCP Inspector against the built server (optional helper).
+- `npm run send -- "+1XXXXXXXXXX" "Hello"` – send a quick test message.
+- `npm run doctor` / `npm run doctor -- --json` – verify prerequisites.
 
-AppleScript Automations
-- Messages supports AppleScript event handlers (e.g., `on message received`, `on message sent`, `on received file transfer invitation`). Save scripts under `~/Library/Application Scripts/com.apple.iChat/` and enable “Allow Scripts” in Messages → Settings.
-- Call the `applescript_handler_template` tool to get a ready-to-customize script; set the `minimal` flag for a comment-free version.
-- Handlers have a ~10s execution budget—delegate long work to background processes (CLI, MCP tool invocation, etc.) to avoid timeouts.
-- Use a throttling layer if you log from handlers; Messages occasionally fires duplicate events for the active chat.
+## Tool Reference
 
-Security
-- No network calls are made; everything runs locally. The server only reads from Messages.db and uses AppleScript to send messages.
-- Set `MESSAGES_MCP_READONLY=true` to start the server without any send capability (all tools become read-only).
-- Opt-in masking is available via `MESSAGES_MCP_MASK_RECIPIENTS=true` to reduce accidental exposure in logs. Do not commit any logs containing personal data.
+| Tool | Description | Notes |
+| ---- | ----------- | ----- |
+| `about` | Returns version/build metadata, repository links, and runtime environment info. | Surface this in clients to confirm the deployed build. |
+| `list_chats` | Lists recent chats with participants, unread counts, and last-activity timestamps (Apple epoch converted to UNIX/ISO). | Supports filters: `limit`, `participant`, `updated_after_unix_ms`, `unread_only`. |
+| `get_messages` | Retrieves normalized message rows by `chat_id` or `participant`, optionally with contextual windows and attachment metadata. | Structured payload includes ISO timestamps, message types, and optional context bundle. |
+| `send_text` | Sends text to a recipient/chat and returns structured JSON with target metadata, latest/recent messages, and any lookup errors. | Honors `MESSAGES_MCP_READONLY`; response always includes a human-readable summary inside the JSON. |
+| `send_attachment` | Sends a file (with optional caption) using the same targeting options as `send_text`. | Structured JSON includes attachment details + recent history. |
+| `search_messages` / `search_messages_safe` | Full-text search with scoping options and convenience defaults to avoid whole DB scans. | Safe variant enforces day-based limits automatically. |
+| `context_around_message` | Fetches a window of normalized messages around an anchor `message_rowid`. | Useful for tools that need surrounding context without large history fetches. |
+| `get_attachments` | Resolves attachment metadata (names, MIME types, byte sizes, resolved paths) with strict per-message caps. | Always read-only. |
+| `doctor` | Structured diagnostics covering AppleScript availability, Messages services, SQLite access, and version metadata. | Returns JSON + summary string; artifacts can be collected in CI. |
+| `applescript_handler_template` | Generates a starter AppleScript for message events (received/sent/transfer). | Save under `~/Library/Application Scripts/com.apple.iChat/`. |
+| `search` / `fetch` | Connector-friendly tools for ChatGPT Pro / Deep Research (Streamable HTTP mode). | Emit JSON strings matching MCP connector expectations. |
+
+## Configuration
+
+Environment variables:
+
+- `MESSAGES_MCP_READONLY=true` – disable `send_text`/`send_attachment` while keeping read tools enabled.
+- `MESSAGES_MCP_MASK_RECIPIENTS=true` – mask phone numbers/emails in responses.
+- `MESSAGES_MCP_HTTP_*` – configure optional Streamable HTTP transport (`PORT`, `HOST`, `ENABLE_SSE`, `CORS_ORIGINS`, etc.).
+- `MESSAGES_MCP_CONNECTOR_*` – tweak connector search behavior (days back, result limits, base URL for citations).
+
+Grant Full Disk Access before running the server so SQLite reads succeed. Without it, `doctor` will warn and send tools will fail silently in Messages.app.
+
+## Versioning & Support
+
+- The current package version is tracked in `package.json` (now `1.1.0`).
+- The `about` and `doctor` tools expose the deployed version, git commit (when available), repository, and runtime information—ideal for client dashboards.
+- Use semantic versioning: bump the minor version for new features, patch for fixes, and major if you introduce breaking changes to tool schemas.
+
+## Development
+
+- `npm run dev` starts the stdio server via ts-node.
+- `npm run build` compiles TypeScript to `dist/`; run `npm start` to execute the compiled build.
+- An MCP Inspector session can be launched with `npm run inspector`.
+- Scripts are documented in `package.json`; use `npm run send` or `npm run doctor` for quick manual checks.
+
+## Testing
+
+- `npm test` runs Vitest with coverage (see `tests/utils/*.spec.ts`).
+- Focus tests on edge cases: mixed chat schemas, Apple epoch conversions, structured response shapes.
+- CI (GitHub Actions, macOS) runs install → test → build → doctor; keep workflows green before cutting a release.
+
+## Release Process
+
+1. Ensure `npm run build` and `npm test` pass locally.
+2. Update documentation (this README, `CONTRIBUTING.md`) if tool contracts change.
+3. Bump `package.json` and mention the change in your commit message/PR.
+4. Tag releases after merging to `main`; the `about` tool will automatically reflect the new version and commit hash.
+
+## Security Notes
+
+- The MCP server runs locally; no external network calls are made by default. Any future outbound integration should be discussed first.
+- Database access is strictly read-only via `/usr/bin/sqlite3 -readonly -json`.
+- Do not log or commit sensitive chat content. Tests should rely on mocks or anonymized fixtures.
+
+## Contributing
+
+Please read the [contribution guidelines](CONTRIBUTING.md) for coding standards, testing expectations, and release practices. Conventional commits are encouraged (`feat:`, `fix:`, `docs:` …).
+
+## License
+
+Released under the [MIT License](LICENSE).
