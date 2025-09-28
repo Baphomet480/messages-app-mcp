@@ -54,6 +54,21 @@ Helper scripts:
 - `npm run send -- "+1XXXXXXXXXX" "Hello"` – send a quick test message.
 - `npm run doctor` / `npm run doctor -- --json` – verify prerequisites.
 
+### Install via npm / npx
+
+Once a release is published to npm you can install or run the package directly:
+
+```bash
+# one-shot usage
+npx messages-mcp --help
+
+# or install globally
+npm install -g messages.app-mcp
+messages-mcp --help
+```
+
+The binary exposed by npm is identical to `dist/index.js`; all runtime requirements (Full Disk Access, Node 18+) still apply.
+
 ## Tool Reference
 
 | Tool | Description | Notes |
@@ -106,6 +121,7 @@ Grant Full Disk Access before running the server so SQLite reads succeed. Withou
 2. Update documentation (this README, `CONTRIBUTING.md`) if tool contracts change.
 3. Bump `package.json` and mention the change in your commit message/PR.
 4. Tag releases after merging to `main`; the `about` tool will automatically reflect the new version and commit hash.
+5. Publish to npm with `npm publish --access public` (or rely on the GitHub Actions release workflow which publishes when an `v*` tag is pushed and `NPM_TOKEN` is configured).
 
 ## Security Notes
 

@@ -1,7 +1,7 @@
 {
   "name": "messages.app-mcp",
   "version": "1.1.0",
-  "description": "",
+  "description": "Model Context Protocol server for macOS Messages.app (list chats, read history, send messages)",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -15,11 +15,33 @@
     "send": "node scripts/send.mjs",
     "doctor": "node scripts/doctor.mjs",
     "doctor:json": "node scripts/doctor.mjs --json",
-    "inspector": "npx @modelcontextprotocol/inspector node dist/index.js"
+    "inspector": "npx @modelcontextprotocol/inspector node dist/index.js",
+    "prepare": "npm run build"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "Matthias",
+  "license": "MIT",
+  "homepage": "https://github.com/Baphomet480/messages.app-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Baphomet480/messages.app-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Baphomet480/messages.app-mcp/issues"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "model-context-protocol",
+    "mcp",
+    "messages",
+    "imessage",
+    "sms",
+    "apple"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",
     "cors": "^2.8.5",
