@@ -24,6 +24,7 @@ import {
 } from "./utils/sqlite.js";
 import { buildSendFailurePayload, buildSendSuccessPayload } from "./utils/send-result.js";
 import type { MessageLike, SendTargetDescriptor } from "./utils/send-result.js";
+import { getVersionInfo } from "./utils/version.js";
 import { runDoctor } from "./utils/doctor.js";
 import type { EnrichedMessageRow, AttachmentInfo } from "./utils/sqlite.js";
 
@@ -650,6 +651,10 @@ function createConfiguredServer(): McpServer {
         sqlite_access: z.boolean(),
         db_path: z.string(),
         notes: z.array(z.string()),
+        package_name: z.string(),
+        package_version: z.string(),
+        git_commit: z.string().nullable(),
+        git_commit_short: z.string().nullable(),
       }
     },
     async () => {
@@ -658,6 +663,49 @@ function createConfiguredServer(): McpServer {
       return {
         content: textContent(summary + (structured.notes.length ? `\nnotes:\n- ${structured.notes.join("\n- ")}` : "")),
         structuredContent: structured,
+      };
+    }
+  );
+
+  server.registerTool(
+    "about",
+    {
+      title: "About messages.app-mcp",
+      description: "Return version, build, and repository metadata about this MCP server.",
+      outputSchema: {
+        name: z.string(),
+        version: z.string(),
+        git_commit: z.string().nullable(),
+        git_commit_short: z.string().nullable(),
+        repository: z.string().url(),
+        documentation: z.string().url(),
+        maintainer: z.string().optional(),
+        generated_at: z.string(),
+        environment: z.object({
+          node_version: z.string(),
+          platform: z.string(),
+        }),
+      },
+    },
+    async () => {
+      const version = await getVersionInfo();
+      const payload = {
+        name: version.name,
+        version: version.version,
+        git_commit: version.git_commit,
+        git_commit_short: version.git_commit_short,
+        repository: "https://github.com/Baphomet480/messages.app-mcp",
+        documentation: "https://github.com/Baphomet480/messages.app-mcp#readme",
+        maintainer: "Matthias (messages.app-mcp)",
+        generated_at: new Date().toISOString(),
+        environment: {
+          node_version: process.version,
+          platform: `${process.platform} ${process.arch}`,
+        },
+      } as const;
+      return {
+        content: textContent(JSON.stringify(payload, null, 2)),
+        structuredContent: payload,
       };
     }
   );

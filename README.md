@@ -97,11 +97,14 @@ Remote MCP (ChatGPT Pro / Deep Research)
   - Resolves attachment transfer names, MIME types, byte sizes, and absolute file paths (still read-only).
 - `doctor()`
   - Structured environment diagnostics with actionable remediation notes.
+  - Includes the current package version and git commit (if available) in the summary and structured payload.
+- `about()`
+  - Returns metadata about this MCP server, including the current version, git commit (when available), repository, and runtime environment details.
 
 Set `MESSAGES_MCP_MASK_RECIPIENTS=true` to redact phone numbers/emails in tool responses (useful when logging remotely or demoing). Leave unset to show full recipients locally.
 
 Structured Output
-- For `list_chats`, `get_messages`, `send_text`, and `send_attachment`, the server now returns both:
+- For `list_chats`, `get_messages`, `send_text`, `send_attachment`, and `about`, the server now returns both:
   - `structuredContent` validated against an `outputSchema` (for clients that support it), and
   - a text fallback containing pretty‑printed JSON for broad compatibility.
 

@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { runAppleScriptInline } from "./applescript.js";
 import { getChatDbPath } from "./sqlite.js";
+import { getVersionInfo } from "./version.js";
 
 export type DoctorReport = {
   ok: boolean;
@@ -12,10 +13,15 @@ export type DoctorReport = {
   sqlite_access: boolean;
   db_path: string;
   notes: string[];
+  package_name: string;
+  package_version: string;
+  git_commit: string | null;
+  git_commit_short: string | null;
 };
 
 export async function runDoctor(): Promise<DoctorReport & { summary: string }> {
   const notes: string[] = [];
+  const version = await getVersionInfo();
 
   // Check osascript availability by running a trivial script
   let osascript_available = false;
@@ -87,6 +93,7 @@ export async function runDoctor(): Promise<DoctorReport & { summary: string }> {
 
   const ok = osascript_available && sqlite_access; // do not require service enumeration
   const summary = [
+    `${version.name} v${version.version}${version.git_commit_short ? ` (${version.git_commit_short})` : ""}`,
     `osascript: ${osascript_available ? "ok" : "missing"}`,
     `services: ${services.join(", ") || "(none)"}`,
     `accounts: ${accounts.join(", ") || "(none)"}`,
@@ -105,6 +112,10 @@ export async function runDoctor(): Promise<DoctorReport & { summary: string }> {
     sqlite_access,
     db_path,
     notes,
+    package_name: version.name,
+    package_version: version.version,
+    git_commit: version.git_commit,
+    git_commit_short: version.git_commit_short,
     summary,
   };
 }
