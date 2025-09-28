@@ -10,7 +10,20 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { sendMessageAppleScript, sendAttachmentAppleScript, MESSAGES_FDA_HINT, type SendTarget } from "./utils/applescript.js";
-import { listChats, getMessagesByChatId, getMessagesByParticipant, appleEpochToUnixMs, searchMessages, contextAroundMessage, getAttachmentsForMessages, getChatIdByGuid } from "./utils/sqlite.js";
+import {
+  listChats,
+  getMessagesByChatId,
+  getMessagesByParticipant,
+  appleEpochToUnixMs,
+  searchMessages,
+  contextAroundMessage,
+  getAttachmentsForMessages,
+  getChatIdByGuid,
+  getChatIdByDisplayName,
+  getChatIdByParticipant,
+} from "./utils/sqlite.js";
+import { buildSendFailurePayload, buildSendSuccessPayload } from "./utils/send-result.js";
+import type { MessageLike, SendTargetDescriptor } from "./utils/send-result.js";
 import { runDoctor } from "./utils/doctor.js";
 import type { EnrichedMessageRow, AttachmentInfo } from "./utils/sqlite.js";
 
@@ -84,6 +97,15 @@ function describeSendTarget(input: SendTargetInput): string {
   return "target";
 }
 
+function buildTargetDescriptor(input: SendTargetInput): SendTargetDescriptor {
+  return {
+    recipient: input.recipient?.trim() ?? null,
+    chat_guid: input.chat_guid?.trim() ?? null,
+    chat_name: input.chat_name?.trim() ?? null,
+    display: describeSendTarget(input),
+  };
+}
+
 function hasTarget(input: SendTargetInput): boolean {
   return Boolean(
     (input.recipient && input.recipient.trim()) ||
@@ -107,6 +129,44 @@ function buildSendTarget(input: SendTargetInput): SendTarget {
     target.recipient = input.recipient.trim();
   }
   return target;
+}
+
+async function resolveChatIdForTarget(input: SendTargetInput): Promise<number | null> {
+  if (input.chat_guid && input.chat_guid.trim().length > 0) {
+    const resolved = await getChatIdByGuid(input.chat_guid.trim());
+    if (resolved != null) return resolved;
+  }
+  if (input.chat_name && input.chat_name.trim().length > 0) {
+    const resolved = await getChatIdByDisplayName(input.chat_name.trim());
+    if (resolved != null) return resolved;
+  }
+  if (input.recipient && input.recipient.trim().length > 0) {
+    const resolved = await getChatIdByParticipant(input.recipient.trim());
+    if (resolved != null) return resolved;
+  }
+  return null;
+}
+
+async function collectRecentMessages(
+  input: SendTargetInput,
+  limit = 10,
+): Promise<{ chatId: number | null; messages: NormalizedMessage[]; lookupError: string | null }> {
+  let chatId: number | null = null;
+  let lookupError: string | null = null;
+  let messages: NormalizedMessage[] = [];
+  try {
+    chatId = await resolveChatIdForTarget(input);
+    if (chatId != null) {
+      const recentRows = await getMessagesByChatId(chatId, limit);
+      const rowsWithChat = recentRows.map((row) => ({ ...row, chat_id: chatId })) as Array<
+        EnrichedMessageRow & { chat_id?: number }
+      >;
+      messages = normalizeMessages(rowsWithChat);
+    }
+  } catch (err) {
+    lookupError = err instanceof Error ? err.message : String(err);
+  }
+  return { chatId, messages, lookupError };
 }
 
 function sanitizeText(s: string | null | undefined): string | null {
@@ -215,7 +275,7 @@ const TAPBACK_TYPES: Record<number, { code: string; removed?: boolean }> = {
   3005: { code: "question", removed: true },
 };
 
-type NormalizedMessage = {
+type NormalizedMessage = MessageLike & {
   message_rowid: number;
   chat_id?: number | null;
   guid: string;
@@ -453,17 +513,32 @@ function createConfiguredServer(): McpServer {
       "Send a text/iMessage via Messages.app to a phone number or email.",
       sendTextInputSchema,
       async ({ recipient, chat_guid, chat_name, text }) => {
+        const base = { recipient, chat_guid, chat_name };
+        const targetDescriptor = buildTargetDescriptor(base);
         try {
-          const base = { recipient, chat_guid, chat_name };
           const target = buildSendTarget(base);
           await sendMessageAppleScript(target, text);
-          const shown = describeSendTarget(base);
-          return { content: textContent(`Sent message to ${shown}.`) };
+
+          const { chatId, messages, lookupError } = await collectRecentMessages(base);
+          const payload = buildSendSuccessPayload<NormalizedMessage>({
+            target: targetDescriptor,
+            chatId,
+            messages,
+            lookupError,
+          });
+          const jsonText = JSON.stringify(payload, null, 2);
+          return {
+            content: textContent(jsonText),
+            structuredContent: payload,
+          };
         } catch (e) {
-          const base = { recipient, chat_guid, chat_name };
-          const shown = hasTarget(base) ? describeSendTarget(base) : "target";
           const reason = cleanOsaError(e);
-          return { content: textContent(`Failed to send to ${shown}. ${reason}`), isError: true };
+          const payload = buildSendFailurePayload(targetDescriptor, reason);
+          return {
+            content: textContent(JSON.stringify(payload, null, 2)),
+            structuredContent: payload,
+            isError: true,
+          };
         }
       }
     );
@@ -498,21 +573,46 @@ function createConfiguredServer(): McpServer {
         try {
           const base = { recipient, chat_guid, chat_name };
           const target = buildSendTarget(base);
-          await sendAttachmentAppleScript(target, file_path, caption);
-          const shown = describeSendTarget(base);
           const trimmedPath = file_path?.trim?.() ?? file_path;
+          await sendAttachmentAppleScript(target, trimmedPath, caption);
+          const targetDescriptor = buildTargetDescriptor(base);
+
           const fileLabel = trimmedPath ? basename(trimmedPath) : null;
           const labelSegment = fileLabel ? `"${fileLabel}" ` : "";
-          return { content: textContent(`Sent attachment ${labelSegment}to ${shown}.`) };
+          const summary = `Sent attachment ${labelSegment}to ${targetDescriptor.display}.`.trim();
+
+          const { chatId, messages, lookupError } = await collectRecentMessages(base);
+          const basePayload = buildSendSuccessPayload<NormalizedMessage>({
+            target: targetDescriptor,
+            chatId,
+            messages,
+            lookupError,
+            summary,
+          });
+          const payload = {
+            ...basePayload,
+            attachment: {
+              file_path: trimmedPath ?? null,
+              file_label: fileLabel,
+              caption: caption?.trim?.() ?? null,
+            },
+          };
+          return {
+            content: textContent(JSON.stringify(payload, null, 2)),
+            structuredContent: payload,
+          };
         } catch (e) {
           const base = { recipient, chat_guid, chat_name };
-          const shown = hasTarget(base) ? describeSendTarget(base) : "target";
+          const targetDescriptor = buildTargetDescriptor(base);
           const reason =
             e instanceof Error && e.message === MESSAGES_FDA_HINT
               ? e.message
               : cleanOsaError(e);
+          const summary = `Failed to send attachment to ${targetDescriptor.display}. ${reason}`.trim();
+          const payload = buildSendFailurePayload(targetDescriptor, reason, { summary });
           return {
-            content: textContent(`Failed to send attachment to ${shown}. ${reason}`),
+            content: textContent(JSON.stringify(payload, null, 2)),
+            structuredContent: payload,
             isError: true,
           };
         }
@@ -652,7 +752,22 @@ function createConfiguredServer(): McpServer {
           ? await getMessagesByChatId(chat_id, limit)
           : await getMessagesByParticipant(participant!, limit);
         const mapped = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
-        const structuredContent: { messages: NormalizedMessage[]; context?: { anchor_rowid: number; before: number; after: number; include_attachments_meta: boolean; messages: NormalizedMessage[] } } = { messages: mapped };
+        const summaryParts: string[] = [];
+        if (chat_id != null) summaryParts.push(`chat_id=${chat_id}`);
+        if (participant) summaryParts.push(`participant=${participant}`);
+        summaryParts.push(`limit=${limit}`);
+        const summary = `Retrieved ${mapped.length} messages${summaryParts.length ? ` (${summaryParts.join(", ")})` : ""}.`;
+        const structuredContent: {
+          summary: string;
+          messages: NormalizedMessage[];
+          context?: {
+            anchor_rowid: number;
+            before: number;
+            after: number;
+            include_attachments_meta: boolean;
+            messages: NormalizedMessage[];
+          };
+        } = { summary, messages: mapped };
         if (context_anchor_rowid != null) {
           const ctxRows = await contextAroundMessage(context_anchor_rowid, context_before, context_after, !!context_include_attachments_meta);
           const ctxMessages = normalizeMessages(ctxRows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
@@ -664,8 +779,9 @@ function createConfiguredServer(): McpServer {
             messages: ctxMessages,
           };
         }
+        const jsonText = JSON.stringify(structuredContent, null, 2);
         return {
-          content: textContent(JSON.stringify(structuredContent, null, 2)),
+          content: textContent(jsonText),
           structuredContent,
         };
       } catch (e) {
@@ -1356,12 +1472,54 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
   });
 }
 
+async function runStdioServer(): Promise<void> {
+  const server = createConfiguredServer();
+  const transport = new StdioServerTransport();
+  let settled = false;
+
+  const waitForClose = new Promise<void>((resolve, reject) => {
+    const resolveOnce = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const rejectOnce = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+
+    server.server.onclose = resolveOnce;
+    server.server.onerror = rejectOnce;
+  });
+
+  const shutdown = () => {
+    server.close().catch(() => {});
+  };
+
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  const wasPaused = typeof process.stdin.isPaused === "function" ? process.stdin.isPaused() : false;
+
+  try {
+    await server.connect(transport);
+    if (!process.stdin.destroyed) {
+      process.stdin.resume();
+    }
+    await waitForClose;
+  } finally {
+    process.removeListener("SIGINT", shutdown);
+    process.removeListener("SIGTERM", shutdown);
+    if (wasPaused && !process.stdin.destroyed) {
+      process.stdin.pause();
+    }
+  }
+}
+
 async function main() {
   const launch = parseLaunchOptions();
   if (launch.mode === "stdio") {
-    const server = createConfiguredServer();
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
+    await runStdioServer();
     return;
   }
 

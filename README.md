@@ -76,9 +76,11 @@ Remote MCP (ChatGPT Pro / Deep Research)
 - `send_text({ text: string, recipient?: string, chat_guid?: string, chat_name?: string })`
   - Provide at least one target field. Targets can be people (phone/email) or existing group chats by GUID/display name.
   - Disabled automatically when `MESSAGES_MCP_READONLY=true`.
+  - Responses are structured JSON: the `structuredContent` object (and the text fallback) include a summary, target metadata, and recent normalized message rows pulled from chat history.
 - `send_attachment({ file_path: string, caption?: string, recipient?|chat_guid?|chat_name? })`
   - Sends files via AppleScript after optional caption delivery. Ensure Messages has Full Disk Access in System Settings; otherwise the OS may show “Not Delivered.”
   - Read-only mode blocks this tool automatically.
+  - Returns the same structured JSON shape as `send_text` plus an `attachment` descriptor (path, resolved filename, caption).
 - `applescript_handler_template({ minimal?: boolean })`
   - Returns a starter AppleScript with `message received`, `message sent`, and `received file transfer invitation` handlers. Save it under `~/Library/Application Scripts/com.apple.iChat/` to enable “push” style automations (AppleScript handlers still have the ~10s execution limit).
 - `search_messages({ query: string, chat_id|participant|from/to unix, ... })`
@@ -99,7 +101,7 @@ Remote MCP (ChatGPT Pro / Deep Research)
 Set `MESSAGES_MCP_MASK_RECIPIENTS=true` to redact phone numbers/emails in tool responses (useful when logging remotely or demoing). Leave unset to show full recipients locally.
 
 Structured Output
-- For `list_chats` and `get_messages`, the server now returns both:
+- For `list_chats`, `get_messages`, `send_text`, and `send_attachment`, the server now returns both:
   - `structuredContent` validated against an `outputSchema` (for clients that support it), and
   - a text fallback containing pretty‑printed JSON for broad compatibility.
 

@@ -269,6 +269,7 @@ type MessageColumnSupport = {
 };
 
 let cachedMessageColumnSupport: MessageColumnSupport | null = null;
+const tableColumnCache = new Map<string, Set<string>>();
 
 async function getMessageColumnSupport(dbPath: string): Promise<MessageColumnSupport> {
   if (cachedMessageColumnSupport) return cachedMessageColumnSupport;
@@ -309,9 +310,15 @@ export function resolveAttachmentPath(filename: string | null): string | null {
 }
 
 async function tableHasColumn(dbPath: string, table: string, column: string): Promise<boolean> {
-  const pragma = `PRAGMA table_info(${table});`;
-  const rows = (await runSqliteJSON(dbPath, pragma)) as Array<{ name: string }>;
-  return rows.some((r) => r.name === column);
+  const key = `${dbPath}::${table}`;
+  let cached = tableColumnCache.get(key);
+  if (!cached) {
+    const pragma = `PRAGMA table_info(${table});`;
+    const rows = (await runSqliteJSON(dbPath, pragma)) as Array<{ name: string }>;
+    cached = new Set(rows.map((r) => r.name));
+    tableColumnCache.set(key, cached);
+  }
+  return cached.has(column);
 }
 
 async function resolveHandlesForParticipant(dbPath: string, participant: string): Promise<string[]> {
@@ -481,9 +488,36 @@ export type ListChatsOptions = {
 
 export async function listChats(limit = 50, options: ListChatsOptions = {}): Promise<ChatRow[]> {
   const db = getChatDbPath();
+  const hasUnreadCountColumn = await tableHasColumn(db, "chat", "unread_count");
+  let unreadExpr = "COALESCE(c.unread_count, 0)";
+  if (!hasUnreadCountColumn) {
+    const [hasIsReadColumn, hasLastReadTimestamp] = await Promise.all([
+      tableHasColumn(db, "message", "is_read"),
+      tableHasColumn(db, "chat", "last_read_message_timestamp"),
+    ]);
+
+    const computedUnreadPredicates = ["mu.is_from_me = 0"];
+    if (hasIsReadColumn) {
+      computedUnreadPredicates.push("COALESCE(mu.is_read, 0) = 0");
+    } else if (hasLastReadTimestamp) {
+      computedUnreadPredicates.push("mu.date > COALESCE(c.last_read_message_timestamp, 0)");
+    } else {
+      computedUnreadPredicates.push("1 = 0");
+    }
+
+    const computedUnreadExpr = `(
+        SELECT COUNT(*)
+        FROM chat_message_join cmju
+        JOIN message mu ON mu.ROWID = cmju.message_id
+        WHERE cmju.chat_id = c.ROWID
+          AND ${computedUnreadPredicates.join(" AND ")}
+      )`;
+    unreadExpr = `COALESCE(${computedUnreadExpr}, 0)`;
+  }
+
   const filters: string[] = [];
   if (options.unreadOnly) {
-    filters.push("COALESCE(c.unread_count, 0) > 0");
+    filters.push(`${unreadExpr} > 0`);
   }
   if (options.participant) {
     const handles = await resolveHandlesForParticipant(db, options.participant);
@@ -512,7 +546,7 @@ export async function listChats(limit = 50, options: ListChatsOptions = {}): Pro
     SELECT c.ROWID AS chat_id,
            c.guid AS guid,
            c.display_name AS display_name,
-           c.unread_count AS unread_count,
+           ${unreadExpr} AS unread_count,
            lm.last_message_date AS last_message_date,
            (
              SELECT GROUP_CONCAT(DISTINCT h.id)
@@ -570,6 +604,57 @@ export async function getMessagesByParticipant(participant: string, limit = 50):
   const rows = (await runSqliteJSON(db, sql)) as EnrichedMessageRow[];
   await hydrateAttributedBodies(rows);
   return rows;
+}
+
+export async function getChatIdByDisplayName(displayName: string): Promise<number | null> {
+  const trimmed = displayName?.trim();
+  if (!trimmed) return null;
+  const db = getChatDbPath();
+  const safeName = trimmed.replaceAll("'", "''");
+  const rows = await runSqliteJSON(db, `
+    SELECT ROWID AS chat_id
+    FROM chat
+    WHERE display_name = '${safeName}'
+    ORDER BY ROWID DESC
+    LIMIT 1;`) as Array<{ chat_id: number | null }>;
+  const value = rows[0]?.chat_id;
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return value;
+}
+
+export async function getChatIdByParticipant(participant: string): Promise<number | null> {
+  const trimmed = participant?.trim();
+  if (!trimmed) return null;
+  const db = getChatDbPath();
+  const handles = await resolveHandlesForParticipant(db, trimmed);
+  if (!handles.length) return null;
+  const quotedList = handles.map((h) => `'${h.replaceAll("'", "''")}'`).join(",");
+  if (!quotedList) return null;
+  const rows = await runSqliteJSON(db, `
+    WITH target_chats AS (
+      SELECT DISTINCT ch.chat_id
+      FROM chat_handle_join ch
+      JOIN handle h ON h.ROWID = ch.handle_id
+      WHERE h.id IN (${quotedList})
+    ), ranked AS (
+      SELECT cmj.chat_id AS chat_id,
+             MAX(m.date) AS last_message_date
+      FROM chat_message_join cmj
+      JOIN message m ON m.ROWID = cmj.message_id
+      WHERE cmj.chat_id IN (SELECT chat_id FROM target_chats)
+      GROUP BY cmj.chat_id
+    )
+    SELECT chat_id
+    FROM (
+      SELECT chat_id, last_message_date FROM ranked
+      UNION ALL
+      SELECT chat_id, NULL AS last_message_date FROM target_chats
+    )
+    ORDER BY last_message_date DESC NULLS LAST, chat_id DESC
+    LIMIT 1;`) as Array<{ chat_id: number | null }>;
+  const value = rows[0]?.chat_id;
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return value;
 }
 
 export type SearchOptions = {

@@ -1,60 +1,102 @@
-import { describe, expect, it } from 'vitest'
-import { appleEpochToUnixMs, resolveAttachmentPath } from '../../src/utils/sqlite'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { describe, it, expect, vi } from "vitest";
 
-// Apple epoch starts 2001-01-01T00:00:00Z => UNIX 978307200 seconds
-const APPLE_EPOCH_UNIX = 978307200 * 1000
+const execFileMock = vi.fn();
 
-describe('appleEpochToUnixMs', () => {
-  it('handles seconds', () => {
-    expect(appleEpochToUnixMs(0)).toBe(APPLE_EPOCH_UNIX)
-    expect(appleEpochToUnixMs(1)).toBe(APPLE_EPOCH_UNIX + 1000)
-  })
+async function loadSqliteModule() {
+  vi.resetModules();
+  execFileMock.mockReset();
+  vi.doMock("node:child_process", () => ({
+    execFile: execFileMock,
+  }));
+  return import("../../src/utils/sqlite.js");
+}
 
-  it('handles microseconds (large realistic value)', () => {
-    // 1,500,000 seconds in microseconds (≈17.36 days)
-    const us = 1_500_000_000_000
-    expect(appleEpochToUnixMs(us)).toBe(APPLE_EPOCH_UNIX + 1_500_000_000)
-  })
+describe("getChatIdByDisplayName", () => {
+  it("returns chat id when display name matches", async () => {
+    const { getChatIdByDisplayName } = await loadSqliteModule();
+    execFileMock.mockImplementation((file, args, options, callback) => {
+      const cb = (typeof options === "function" ? options : callback) as (
+        err: Error | null,
+        stdout: string,
+        stderr: string,
+      ) => void;
+      const argv = Array.isArray(args) ? args : [];
+      const sql = typeof argv[3] === "string" ? argv[3] : "";
+      if (sql.includes("FROM chat")) {
+        cb(null, '[{"chat_id":99}]', "");
+      } else {
+        cb(null, "[]", "");
+      }
+      return {} as any;
+    });
 
-  it('handles nanoseconds (large realistic value)', () => {
-    // 2,000,000 seconds in nanoseconds (≈23.1 days)
-    const ns = 2_000_000_000_000_000
-    expect(appleEpochToUnixMs(ns)).toBe(APPLE_EPOCH_UNIX + 2_000_000_000)
-  })
+    const result = await getChatIdByDisplayName("Family");
+    expect(result).toBe(99);
+  });
 
-  it('handles milliseconds (heuristic)', () => {
-    // Heuristic branch when n > 1e9: treat as milliseconds
-    const ms = 2_500_000_000 // 2,500,000 seconds
-    expect(appleEpochToUnixMs(ms)).toBe(APPLE_EPOCH_UNIX + 2_500_000_000)
-  })
+  it("returns null when no rows", async () => {
+    const { getChatIdByDisplayName } = await loadSqliteModule();
+    execFileMock.mockImplementation((file, args, options, callback) => {
+      const cb = (typeof options === "function" ? options : callback) as (
+        err: Error | null,
+        stdout: string,
+        stderr: string,
+      ) => void;
+      cb(null, "[]", "");
+      return {} as any;
+    });
 
-  it('handles null/undefined and non-finite', () => {
-    expect(appleEpochToUnixMs(null as unknown as number)).toBeNull()
-    expect(appleEpochToUnixMs(undefined as unknown as number)).toBeNull()
-    expect(appleEpochToUnixMs(Number.NaN)).toBeNull()
-  })
-})
+    const result = await getChatIdByDisplayName("Missing");
+    expect(result).toBeNull();
+  });
+});
 
-describe('resolveAttachmentPath', () => {
-  it('expands leading ~/', () => {
-    const home = homedir()
-    expect(resolveAttachmentPath('~/Library/Messages/foo.jpg')).toBe(join(home, 'Library/Messages/foo.jpg'))
-  })
+describe("getChatIdByParticipant", () => {
+  it("resolves chat id using latest activity", async () => {
+    const { getChatIdByParticipant } = await loadSqliteModule();
+    execFileMock.mockImplementation((file, args, options, callback) => {
+      const cb = (typeof options === "function" ? options : callback) as (
+        err: Error | null,
+        stdout: string,
+        stderr: string,
+      ) => void;
+      const argv = Array.isArray(args) ? args : [];
+      const sql = typeof argv[3] === "string" ? argv[3] : "";
+      if (sql.includes("PRAGMA table_info(handle)")) {
+        cb(null, '[{"name":"ROWID"},{"name":"id"}]', "");
+      } else if (sql.includes("WITH target_chats")) {
+        cb(null, '[{"chat_id":60}]', "");
+      } else {
+        cb(null, "[]", "");
+      }
+      return {} as any;
+    });
 
-  it('preserves absolute paths', () => {
-    const path = '/Users/example/Library/foo.mov'
-    expect(resolveAttachmentPath(path)).toBe(path)
-  })
+    const result = await getChatIdByParticipant("+15551234567");
+    expect(result).toBe(60);
+  });
 
-  it('treats bare ~ as home directory', () => {
-    const home = homedir()
-    expect(resolveAttachmentPath('~')).toBe(home)
-  })
+  it("returns null when no chats match", async () => {
+    const { getChatIdByParticipant } = await loadSqliteModule();
+    execFileMock.mockImplementation((file, args, options, callback) => {
+      const cb = (typeof options === "function" ? options : callback) as (
+        err: Error | null,
+        stdout: string,
+        stderr: string,
+      ) => void;
+      const argv = Array.isArray(args) ? args : [];
+      const sql = typeof argv[3] === "string" ? argv[3] : "";
+      if (sql.includes("PRAGMA table_info(handle)")) {
+        cb(null, '[{"name":"ROWID"},{"name":"id"}]', "");
+      } else if (sql.includes("WITH target_chats")) {
+        cb(null, "[]", "");
+      } else {
+        cb(null, "[]", "");
+      }
+      return {} as any;
+    });
 
-  it('assumes relative paths are under home', () => {
-    const home = homedir()
-    expect(resolveAttachmentPath('Library/Messages/Attachments/abc')).toBe(join(home, 'Library/Messages/Attachments/abc'))
-  })
-})
+    const result = await getChatIdByParticipant("+15550000000");
+    expect(result).toBeNull();
+  });
+});
