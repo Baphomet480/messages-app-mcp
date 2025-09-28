@@ -133,6 +133,8 @@ Grant Full Disk Access before running the server so SQLite reads succeed. Withou
 
 Please read the [contribution guidelines](CONTRIBUTING.md) for coding standards, testing expectations, and release practices. Conventional commits are encouraged (`feat:`, `fix:`, `docs:` …).
 
+The repo-specific build/verify workflow is documented in [docs/reference/build-verify-guidance.md](docs/reference/build-verify-guidance.md); make sure to follow it when opening PRs.
+
 ## License
 
 Released under the [MIT License](LICENSE).

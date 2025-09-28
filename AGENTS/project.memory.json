@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "guidance_version": 1,
+  "repo": {
+    "name": "messages.app-mcp",
+    "default_branch": "main"
+  },
+  "timezone": "America/Phoenix",
+  "domain": null,
+  "targets": [],
+  "environments": {
+    "local": {},
+    "staging": {},
+    "prod": {}
+  },
+  "commands": {
+    "build": "npm run build",
+    "test": "npm test",
+    "lint": null,
+    "format": null,
+    "deploy": null,
+    "smoke": "npm run send -- --help"
+  },
+  "smoke_paths": [],
+  "verification": {
+    "preferred_tools": ["npm", "vitest"],
+    "artifacts": {},
+    "last_verified": null,
+    "tool_versions": {
+      "node": "24.9.0",
+      "npm": "11.6.0",
+      "git": "2.50.1",
+      "tsc": "5.9.2",
+      "vitest": "3.2.4"
+    }
+  },
+  "constraints": {
+    "idempotent_required": true,
+    "dry_run_preferred": true
+  },
+  "assumptions": [],
+  "decisions": {
+    "2025-09-28-guidance": {
+      "context": "Adopted Universal Build–Verify Guidance with repository-specific adjustments",
+      "decision": "Cache session self-check, lighten doc verification, limit memory writes, clarify release tagging",
+      "consequences": "All contributors follow docs/reference/build-verify-guidance.md"
+    }
+  },
+  "tooling": {
+    "browser_tools_present": false,
+    "messages_tools_present": false,
+    "linters_present": [],
+    "test_runners_present": ["vitest"],
+    "versions": {
+      "node": "24.9.0",
+      "npm": "11.6.0",
+      "git": "2.50.1",
+      "tsc": "5.9.2",
+      "vitest": "3.2.4"
+    }
+  },
+  "retention": {
+    "days": 14,
+    "max_bytes": 104857600
+  },
+  "security": {
+    "data_classification": "none",
+    "redaction_rules": ["token", "pii"]
+  },
+  "notifications": {
+    "enabled": false,
+    "recipients": [],
+    "quiet_hours": null,
+    "triggers": {
+      "long_session_minutes": 10,
+      "on_request": true,
+      "on_user_walkaway": true
+    },
+    "summary_level": "brief",
+    "timezone": "America/Phoenix",
+    "history": []
+  },
+  "caveats": [],
+  "notes": {
+    "adr_index": ["2025-09-28-guidance"],
+    "latest_artifacts": {}
+  }
+}
