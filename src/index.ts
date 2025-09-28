@@ -434,7 +434,7 @@ function normalizeAttachment(info: AttachmentInfo) {
 
 function createConfiguredServer(): McpServer {
   const server = new McpServer(
-    { name: "messages.app-mcp", version: "0.1.0" },
+    { name: "messages-app-mcp", version: "0.1.0" },
     {}
   );
 
@@ -670,7 +670,7 @@ function createConfiguredServer(): McpServer {
   server.registerTool(
     "about",
     {
-      title: "About messages.app-mcp",
+      title: "About messages-app-mcp",
       description: "Return version, build, and repository metadata about this MCP server.",
       outputSchema: {
         name: z.string(),
@@ -694,9 +694,9 @@ function createConfiguredServer(): McpServer {
         version: version.version,
         git_commit: version.git_commit,
         git_commit_short: version.git_commit_short,
-        repository: "https://github.com/Baphomet480/messages.app-mcp",
-        documentation: "https://github.com/Baphomet480/messages.app-mcp#readme",
-        maintainer: "Matthias (messages.app-mcp)",
+        repository: "https://github.com/Baphomet480/messages-app-mcp",
+        documentation: "https://github.com/Baphomet480/messages-app-mcp#readme",
+        maintainer: "Matthias (messages-app-mcp)",
         generated_at: new Date().toISOString(),
         environment: {
           node_version: process.version,
@@ -988,7 +988,7 @@ function createConfiguredServer(): McpServer {
           if (!titleParts.length && snippet) {
             titleParts.push(snippet.slice(0, 80));
           }
-          const baseUrl = CONNECTOR_BASE_URL || "mcp://messages.app-mcp";
+          const baseUrl = CONNECTOR_BASE_URL || "mcp://messages-app-mcp";
           const resultId = `message:${msg.message_rowid}`;
           const resolvedChatId = msg.chat_id ?? chatLookup.get(msg.message_rowid);
           const metadataChatId = typeof resolvedChatId === "number" && Number.isFinite(resolvedChatId) ? resolvedChatId : null;
@@ -1078,7 +1078,7 @@ function createConfiguredServer(): McpServer {
         return [when, speaker, body].filter(Boolean).join(" | ");
       };
       const contextLines = normalized.map(formatLine);
-      const baseUrl = CONNECTOR_BASE_URL || "mcp://messages.app-mcp";
+      const baseUrl = CONNECTOR_BASE_URL || "mcp://messages-app-mcp";
       const document = {
         id: `message:${rowId}`,
         title: formatLine(anchor),
@@ -1511,7 +1511,7 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
 
   return new Promise<void>((resolve) => {
     app.listen(options.port, options.host, () => {
-      console.log(`messages.app-mcp HTTP server listening on http://${options.host}:${options.port}`);
+      console.log(`messages-app-mcp HTTP server listening on http://${options.host}:${options.port}`);
       if (options.enableSseFallback) {
         console.log("Legacy SSE fallback enabled at /sse");
       }
@@ -1575,6 +1575,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("messages.app-mcp failed:", err);
+  console.error("messages-app-mcp failed:", err);
   process.exit(1);
 });

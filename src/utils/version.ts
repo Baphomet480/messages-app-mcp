@@ -32,7 +32,7 @@ async function resolveGitRevision(): Promise<{ full: string | null; short: strin
 
 export async function getVersionInfo(): Promise<VersionInfo> {
   if (cachedInfo) return cachedInfo;
-  const baseName = typeof pkg?.name === "string" && pkg.name.trim().length > 0 ? pkg.name : "messages.app-mcp";
+  const baseName = typeof pkg?.name === "string" && pkg.name.trim().length > 0 ? pkg.name : "messages-app-mcp";
   const baseVersion = typeof pkg?.version === "string" && pkg.version.trim().length > 0 ? pkg.version : "0.0.0";
   const { full, short } = await resolveGitRevision();
   cachedInfo = {
@@ -46,7 +46,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 
 export function getVersionInfoSync(): VersionInfo {
   if (cachedInfo) return cachedInfo;
-  const baseName = typeof pkg?.name === "string" && pkg.name.trim().length > 0 ? pkg.name : "messages.app-mcp";
+  const baseName = typeof pkg?.name === "string" && pkg.name.trim().length > 0 ? pkg.name : "messages-app-mcp";
   const baseVersion = typeof pkg?.version === "string" && pkg.version.trim().length > 0 ? pkg.version : "0.0.0";
   cachedInfo = {
     name: baseName,

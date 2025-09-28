@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "guidance_version": 1,
   "repo": {
-    "name": "messages.app-mcp",
+    "name": "messages-app-mcp",
     "default_branch": "main"
   },
   "timezone": "America/Phoenix",

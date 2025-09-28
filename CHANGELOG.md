@@ -23,4 +23,4 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Fixed
 - `listChats` no longer fails on databases missing `chat.unread_count` column.
 
-[1.1.0]: https://github.com/Baphomet480/messages.app-mcp/releases/tag/v1.1.0
+[1.1.0]: https://github.com/Baphomet480/messages-app-mcp/releases/tag/v1.1.0

@@ -1,4 +1,4 @@
-# Contributing to messages.app-mcp
+# Contributing to messages-app-mcp
 
 Thanks for your interest in improving the Messages.app MCP server! This guide outlines how the project is organized and the expectations for contributors.
 

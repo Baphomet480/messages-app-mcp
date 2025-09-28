@@ -1,7 +1,7 @@
 # Messages.app MCP Server
 
-[![CI](https://github.com/Baphomet480/messages.app-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Baphomet480/messages.app-mcp/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/messages.app-mcp.svg)](https://www.npmjs.com/package/messages.app-mcp)
+[![CI](https://github.com/Baphomet480/messages-app-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Baphomet480/messages-app-mcp/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/messages-app-mcp.svg)](https://www.npmjs.com/package/messages-app-mcp)
 
 A Model Context Protocol (MCP) server that lets AI assistants interact with macOS Messages.app—listing chats, reading conversation history (read only), and sending new iMessage/SMS content on demand.
 
@@ -22,7 +22,7 @@ A Model Context Protocol (MCP) server that lets AI assistants interact with macO
 
 ## Overview
 
-`messages.app-mcp` exposes Messages.app over MCP transports (stdio and optional Streamable HTTP). The server is designed for local use: it reads `~/Library/Messages/chat.db` in read-only mode and delegates outgoing sends to AppleScript.
+`messages-app-mcp` exposes Messages.app over MCP transports (stdio and optional Streamable HTTP). The server is designed for local use: it reads `~/Library/Messages/chat.db` in read-only mode and delegates outgoing sends to AppleScript.
 
 ## Key Features
 
@@ -66,7 +66,7 @@ Once a release is published to npm you can install or run the package directly:
 npx messages-mcp --help
 
 # or install globally
-npm install -g messages.app-mcp
+npm install -g messages-app-mcp
 messages-mcp --help
 ```
 
