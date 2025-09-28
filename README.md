@@ -1,5 +1,8 @@
 # Messages.app MCP Server
 
+[![CI](https://github.com/Baphomet480/messages.app-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Baphomet480/messages.app-mcp/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/messages.app-mcp.svg)](https://www.npmjs.com/package/messages.app-mcp)
+
 A Model Context Protocol (MCP) server that lets AI assistants interact with macOS Messages.app—listing chats, reading conversation history (read only), and sending new iMessage/SMS content on demand.
 
 ## Table of Contents
@@ -122,6 +125,7 @@ Grant Full Disk Access before running the server so SQLite reads succeed. Withou
 3. Bump `package.json` and mention the change in your commit message/PR.
 4. Tag releases after merging to `main`; the `about` tool will automatically reflect the new version and commit hash.
 5. Publish to npm with `npm publish --access public` (or rely on the GitHub Actions release workflow which publishes when an `v*` tag is pushed and `NPM_TOKEN` is configured).
+6. **Recommended dry run:** create a pre-release tag (e.g., `v1.1.0-rc1`) without `NPM_TOKEN` set to confirm the workflow completes build/test and exercises the “skip publish” path before cutting a public release.
 
 ## Security Notes
 
@@ -138,3 +142,46 @@ The repo-specific build/verify workflow is documented in [docs/reference/build-v
 ## License
 
 Released under the [MIT License](LICENSE).
+
+---
+
+## Appendix A – Client Configurations
+
+These snippets show how to connect common MCP clients:
+
+**Claude Desktop**
+
+```json
+{
+  "mcpServers": {
+    "messages": {
+      "command": "npx",
+      "args": ["messages-mcp"]
+    }
+  }
+}
+```
+
+**Cursor (`cursor.mcp.json`)**
+
+```json
+{
+  "servers": {
+    "messages": {
+      "command": "messages-mcp",
+      "args": [],
+      "enabled": true
+    }
+  }
+}
+```
+
+**Direct CLI session**
+
+```bash
+npx messages-mcp --help
+# or run the stdio server manually
+eval "$(npm prefix)/bin/messages-mcp"
+```
+
+For HTTP transport, launch `node dist/index.js --http --port 3333 --cors-origin https://chat.openai.com` and point the client at the resulting base URL.
