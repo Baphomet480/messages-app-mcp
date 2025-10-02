@@ -34,43 +34,45 @@ A Model Context Protocol (MCP) server that lets AI assistants interact with macO
 
 ## Requirements
 
-- macOS with Messages.app configured (and opened at least once).
+- macOS with Messages.app configured (and opened at least once). Verified on macOS 26.0.1 (Sequoia); earlier releases should work as long as Messages.app exposes `chat.db`.
 - Node.js 18 or newer (tested on Node 22 in CI).
 - Terminal/iTerm (or whichever shell runs the server) must have **Full Disk Access** to read Messages data.
 
 ## Quick Start
 
 ```bash
-npm install
-npm run build
-npm start # stdio MCP server
+pnpm install
+pnpm run build
+pnpm start # stdio MCP server
 ```
 
-During development you can run `npm run dev` (ts-node) and use the MCP Inspector:
+During development you can run `pnpm run dev` (ts-node) and use the MCP Inspector:
 
 ```bash
-npm run inspector
+pnpm run inspector
 ```
 
 Helper scripts:
 
-- `npm run send -- "+1XXXXXXXXXX" "Hello"` – send a quick test message.
-- `npm run doctor` / `npm run doctor -- --json` – verify prerequisites.
+- `pnpm run send -- "+1XXXXXXXXXX" "Hello"` – send a quick test message.
+- `pnpm run doctor` / `pnpm run doctor -- --json` – verify prerequisites.
 
-### Install via npm / npx
+### Install via npm / pnpm
 
 Once a release is published to npm you can install or run the package directly:
 
 ```bash
 # one-shot usage
-npx messages-mcp --help
+pnpm dlx messages-mcp --help
+# (or use `npx messages-mcp --help` if you prefer npm)
 
 # or install globally
-npm install -g messages-app-mcp
+pnpm add -g messages-app-mcp
+# (or `npm install -g messages-app-mcp`)
 messages-mcp --help
 ```
 
-The binary exposed by npm is identical to `dist/index.js`; all runtime requirements (Full Disk Access, Node 18+) still apply.
+The binary exposed by npm (or installed via pnpm) is identical to `dist/index.js`; all runtime requirements (Full Disk Access, Node 18+) still apply.
 
 ## Tool Reference
 
@@ -107,24 +109,24 @@ Grant Full Disk Access before running the server so SQLite reads succeed. Withou
 
 ## Development
 
-- `npm run dev` starts the stdio server via ts-node.
-- `npm run build` compiles TypeScript to `dist/`; run `npm start` to execute the compiled build.
-- An MCP Inspector session can be launched with `npm run inspector`.
-- Scripts are documented in `package.json`; use `npm run send` or `npm run doctor` for quick manual checks.
+- `pnpm run dev` starts the stdio server via ts-node.
+- `pnpm run build` compiles TypeScript to `dist/`; run `pnpm start` to execute the compiled build.
+- An MCP Inspector session can be launched with `pnpm run inspector`.
+- Scripts are documented in `package.json`; use `pnpm run send` or `pnpm run doctor` for quick manual checks.
 
 ## Testing
 
-- `npm test` runs Vitest with coverage (see `tests/utils/*.spec.ts`).
+- `pnpm test` runs Vitest with coverage (see `tests/utils/*.spec.ts`).
 - Focus tests on edge cases: mixed chat schemas, Apple epoch conversions, structured response shapes.
 - CI (GitHub Actions, macOS) runs install → test → build → doctor; keep workflows green before cutting a release.
 
 ## Release Process
 
-1. Ensure `npm run build` and `npm test` pass locally.
+1. Ensure `pnpm run build` and `pnpm test` pass locally.
 2. Update documentation (this README, `CONTRIBUTING.md`) if tool contracts change.
 3. Bump `package.json` and mention the change in your commit message/PR.
 4. Tag releases after merging to `main`; the `about` tool will automatically reflect the new version and commit hash.
-5. Publish to npm with `npm publish --access public` (or rely on the GitHub Actions release workflow which publishes when an `v*` tag is pushed and `NPM_TOKEN` is configured).
+5. Publish to npm with `pnpm publish --access public` (or rely on the GitHub Actions release workflow which publishes when an `v*` tag is pushed and `NPM_TOKEN` is configured).
 6. **Recommended dry run:** create a pre-release tag (e.g., `v1.1.0-rc1`) without `NPM_TOKEN` set to confirm the workflow completes build/test and exercises the “skip publish” path before cutting a public release.
 
 ## Security Notes
@@ -179,9 +181,9 @@ These snippets show how to connect common MCP clients:
 **Direct CLI session**
 
 ```bash
-npx messages-mcp --help
+pnpm dlx messages-mcp --help
 # or run the stdio server manually
-eval "$(npm prefix)/bin/messages-mcp"
+pnpm dlx messages-mcp
 ```
 
 For HTTP transport, launch `node dist/index.js --http --port 3333 --cors-origin https://chat.openai.com` and point the client at the resulting base URL.
