@@ -1,5 +1,8 @@
 import { execFile } from "node:child_process";
-import pkg from "../../package.json";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const pkg = require("../../package.json") as { name?: string; version?: string };
 
 export type VersionInfo = {
   name: string;

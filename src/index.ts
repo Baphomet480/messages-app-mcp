@@ -24,7 +24,7 @@ import {
 } from "./utils/sqlite.js";
 import { buildSendFailurePayload, buildSendSuccessPayload } from "./utils/send-result.js";
 import type { MessageLike, SendTargetDescriptor } from "./utils/send-result.js";
-import { getVersionInfo } from "./utils/version.js";
+import { getVersionInfo, getVersionInfoSync } from "./utils/version.js";
 import { runDoctor } from "./utils/doctor.js";
 import type { EnrichedMessageRow, AttachmentInfo } from "./utils/sqlite.js";
 
@@ -432,10 +432,32 @@ function normalizeAttachment(info: AttachmentInfo) {
   };
 }
 
+const SERVER_INSTRUCTIONS = [
+  "messages-app-mcp bridges macOS Messages.app to MCP clients.",
+  "",
+  "Core tools:",
+  "- list_chats / get_messages / context_around_message: browse conversation history with attachment metadata.",
+  "- send_text / send_attachment: deliver new messages when MESSAGES_MCP_READONLY is not set.",
+  "- search_messages / search_messages_safe / search: scoped full-text search utilities with connector-friendly output.",
+  "- doctor: verifies AppleScript, Full Disk Access, and accounts before sending.",
+  "- about: returns version, git commit, and runtime environment.",
+  "",
+  "Grant Full Disk Access to the invoking shell so chat.db can be read and attachments can be sent.",
+].join("\n");
+
 function createConfiguredServer(): McpServer {
+  const versionInfo = getVersionInfoSync();
   const server = new McpServer(
-    { name: "messages-app-mcp", version: "0.1.0" },
-    {}
+    {
+      name: versionInfo.name,
+      title: "Messages.app MCP Server",
+      version: versionInfo.version,
+      description: "Expose macOS Messages history, search, and sending flows over MCP.",
+      websiteUrl: "https://github.com/Baphomet480/messages-app-mcp",
+    },
+    {
+      instructions: SERVER_INSTRUCTIONS,
+    }
   );
 
   const sendTextInputSchema = {
