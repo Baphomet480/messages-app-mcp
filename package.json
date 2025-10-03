@@ -1,6 +1,6 @@
 {
   "name": "messages-app-mcp",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "Model Context Protocol server for macOS Messages.app (list chats, read history, send messages)",
   "type": "module",
   "main": "dist/index.js",

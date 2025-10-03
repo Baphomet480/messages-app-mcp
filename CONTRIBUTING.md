@@ -12,8 +12,8 @@ Thanks for your interest in improving the Messages.app MCP server! This guide ou
 
 ## Development workflow
 
-1. Install dependencies with `npm install`.
-2. For interactive development run `npm run dev` (ts-node) or build with `npm run build` and launch `npm start`.
+1. Install dependencies with `pnpm install`.
+2. For interactive development run `pnpm run dev` (ts-node) or build with `pnpm run build` and launch `pnpm start`.
 3. The preferred MCP tooling flow is documented in the [README](README.md); be sure to grant Full Disk Access to your terminal for chat DB access.
 
 ## Coding standards
@@ -26,9 +26,9 @@ Thanks for your interest in improving the Messages.app MCP server! This guide ou
 
 ## Testing
 
-- Run `npm test` (Vitest with coverage). Add or update tests alongside code changes—especially for SQLite query helpers, AppleScript fallbacks, and serialization.
-- `npm run doctor` checks macOS prerequisites; include the output (or summary) for environment-related contributions.
-- Always ensure `npm run build` passes before opening a PR.
+- Run `pnpm test` (Vitest with coverage). Add or update tests alongside code changes—especially for SQLite query helpers, AppleScript fallbacks, and serialization.
+- `pnpm run doctor` checks macOS prerequisites; include the output (or summary) for environment-related contributions.
+- Always ensure `pnpm run build` passes before opening a PR.
 
 ## Commit & PR guidelines
 

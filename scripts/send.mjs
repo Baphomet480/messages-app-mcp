@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Simple CLI sender: npm run send -- "+1XXXXXXXXXX" "Your message"
+// Simple CLI sender: pnpm run send -- "+1XXXXXXXXXX" "Your message"
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { existsSync } from 'node:fs'
@@ -52,14 +52,14 @@ async function main() {
   const recipient = args[0]
   const rest = args.slice(1)
   if (!recipient || rest.length === 0) {
-    console.error('Usage: npm run send -- [--reveal|-r] <recipient> "message text"')
+    console.error('Usage: pnpm run send -- [--reveal|-r] <recipient> "message text"')
     process.exit(2)
   }
   const text = rest.join(' ')
 
   const distPath = resolve(__dirname, '../dist/utils/applescript.js')
   if (!existsSync(distPath)) {
-    console.error('Build required. Run: npm run build')
+    console.error('Build required. Run: pnpm run build')
     process.exit(2)
   }
 

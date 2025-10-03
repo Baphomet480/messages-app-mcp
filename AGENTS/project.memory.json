@@ -14,21 +14,21 @@
     "prod": {}
   },
   "commands": {
-    "build": "npm run build",
-    "test": "npm test",
+    "build": "pnpm run build",
+    "test": "pnpm test",
     "lint": null,
     "format": null,
     "deploy": null,
-    "smoke": "npm run send -- --help"
+    "smoke": "pnpm run send -- --help"
   },
   "smoke_paths": [],
   "verification": {
-    "preferred_tools": ["npm", "vitest"],
+    "preferred_tools": ["pnpm", "vitest"],
     "artifacts": {},
     "last_verified": null,
     "tool_versions": {
       "node": "24.9.0",
-      "npm": "11.6.0",
+      "pnpm": "10.17.1",
       "git": "2.50.1",
       "tsc": "5.9.2",
       "vitest": "3.2.4"
@@ -53,7 +53,7 @@
     "test_runners_present": ["vitest"],
     "versions": {
       "node": "24.9.0",
-      "npm": "11.6.0",
+      "pnpm": "10.17.1",
       "git": "2.50.1",
       "tsc": "5.9.2",
       "vitest": "3.2.4"

@@ -4,7 +4,7 @@ This document captures the tailored workflow rules we follow in this repository.
 
 ## Session self-check
 
-- Run the environment inventory once per session (start of work). Record tool versions: `node`, `npm`, `git`, `tsc`, `vitest`. Cache the result in memory; re-run only if the environment changes.
+- Run the environment inventory once per session (start of work). Record tool versions: `node`, `pnpm`, `git`, `tsc`, `vitest`. Cache the result in memory; re-run only if the environment changes.
 - Warn immediately if a required tool is missing or versions do not match expected ranges.
 
 ## Risk classification & planning
@@ -19,9 +19,9 @@ This document captures the tailored workflow rules we follow in this repository.
 ## Verification expectations
 
 - Always verify before completion:
-  - **Code changes** – run `npm run build` and, when relevant, `npm test`. If a test suite is too heavy for a docs-only change, explain the exception.
-  - **Docs-only changes** – at minimum run a quick check (e.g., `npm run build` to ensure no TypeScript regressions) and manually review links/snippets touched.
-  - **Scripts/CLIs** – perform a smoke run (`npm run send -- --help`, etc.) when feasible.
+  - **Code changes** – run `pnpm run build` and, when relevant, `pnpm test`. If a test suite is too heavy for a docs-only change, explain the exception.
+  - **Docs-only changes** – at minimum run a quick check (e.g., `pnpm run build` to ensure no TypeScript regressions) and manually review links/snippets touched.
+  - **Scripts/CLIs** – perform a smoke run (`pnpm run send -- --help`, etc.) when feasible.
 - Record what was verified, the command, and the result in the final summary. Investigate failures; do not skip silently.
 
 ## Tool provenance

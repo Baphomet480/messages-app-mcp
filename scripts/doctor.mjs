@@ -11,7 +11,7 @@ const wantJson = args.includes('--json')
 async function main() {
   const modPath = resolve(__dirname, '../dist/utils/doctor.js')
   if (!existsSync(modPath)) {
-    console.error('Build required. Run: npm run build')
+    console.error('Build required. Run: pnpm run build')
     process.exit(2)
   }
   const { runDoctor } = await import(pathToFileURL(modPath).href)
@@ -38,4 +38,3 @@ async function main() {
 }
 
 main()
-
