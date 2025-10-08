@@ -1,4 +1,5 @@
 import { mkdir, appendFile, stat, rename, rm, writeFile } from "node:fs/promises";
+import { execSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -29,11 +30,30 @@ function getDefaultLogDirectory(): string {
   if (envDir && envDir.trim().length > 0) {
     return envDir;
   }
+  const repoDir = resolveGitRepositoryLogDir();
+  if (repoDir) {
+    return repoDir;
+  }
   const home = homedir();
   if (process.platform === "darwin") {
     return join(home, "Library", "Logs", "messages-app-mcp");
   }
   return join(home, ".messages-app-mcp", "logs");
+}
+
+function resolveGitRepositoryLogDir(): string | null {
+  try {
+    const output = execSync("git rev-parse --show-toplevel", {
+      cwd: process.cwd(),
+      stdio: ["ignore", "pipe", "ignore"],
+    }).toString().trim();
+    if (!output) {
+      return null;
+    }
+    return join(output, "logs", "messages-app-mcp");
+  } catch {
+    return null;
+  }
 }
 
 function formatLogLine(level: LogLevel, args: unknown[]): string {
