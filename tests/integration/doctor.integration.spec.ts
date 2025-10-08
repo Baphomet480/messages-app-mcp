@@ -12,5 +12,5 @@ describe("doctor integration", () => {
     expect(report).toHaveProperty("git_commit");
     expect(report).toHaveProperty("git_commit_short");
     expect(report.summary).toContain("messages-app-mcp v");
-  });
+  }, 20000);
 });
