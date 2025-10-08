@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ## [2.0.1] - 2025-10-08
 ### Fixed
 - Normalized Messages containing only object-replacement glyphs (`\uFFFC`/`\uFFFD`) now fall back to decoded bodies, preventing connector clients from seeing a lone `�` when sending rich links.
+- CLI sender accepts `pnpm run send -- <recipient> "message"` by ignoring the passthrough `--`, avoiding false "Unable to resolve recipient" errors.
 
 ### Added
 - New rotating file logger writes to `~/Library/Logs/messages-app-mcp/` (configurable via `MESSAGES_MCP_LOG_*`) and mirrors output to stdout/stderr.

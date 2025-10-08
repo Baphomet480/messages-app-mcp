@@ -43,6 +43,9 @@ function cleanOsaError(err) {
 
 async function main() {
   const args = process.argv.slice(2)
+  while (args[0] === '--') {
+    args.shift()
+  }
   // Default: reveal full recipient. Use --mask/-m to mask locally.
   let mask = false
   if (args[0] === '--mask' || args[0] === '-m') {
