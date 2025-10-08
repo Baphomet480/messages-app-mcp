@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ## [Unreleased]
 - Pending updates.
 
+## [2.0.1] - 2025-10-08
+### Fixed
+- Normalized Messages containing only object-replacement glyphs (`\uFFFC`/`\uFFFD`) now fall back to decoded bodies, preventing connector clients from seeing a lone `�` when sending rich links.
+
+### Added
+- New rotating file logger writes to `~/Library/Logs/messages-app-mcp/` (configurable via `MESSAGES_MCP_LOG_*`) and mirrors output to stdout/stderr.
+
 ## [2.0.0] - 2025-10-03
 ### Breaking
 - Unified send tool outputs to a single-envelope schema with `ok` instead of prior `status` union:

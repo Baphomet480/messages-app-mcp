@@ -26,7 +26,18 @@ import { buildSendFailurePayload, buildSendSuccessPayload } from "./utils/send-r
 import type { MessageLike, SendTargetDescriptor, SendResultPayload } from "./utils/send-result.js";
 import { getVersionInfo, getVersionInfoSync } from "./utils/version.js";
 import { runDoctor } from "./utils/doctor.js";
+import { getLogger } from "./utils/logger.js";
 import type { EnrichedMessageRow, AttachmentInfo } from "./utils/sqlite.js";
+
+const logger = getLogger();
+
+process.on("unhandledRejection", (reason) => {
+  logger.error("Unhandled rejection", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  logger.error("Uncaught exception", error);
+});
 
 function textContent(text: string) {
   return [{ type: "text", text } as const];
@@ -170,6 +181,8 @@ async function collectRecentMessages(
   return { chatId, messages, lookupError };
 }
 
+const OBJECT_REPLACEMENT_ONLY = /^[\uFFFC\uFFFD]+$/;
+
 function sanitizeText(s: string | null | undefined): string | null {
   if (s == null) return null;
   try {
@@ -307,10 +320,16 @@ function normalizeMessage(row: EnrichedMessageRow & { chat_id?: number }): Norma
   const hasAttachments = (row.has_attachments ?? 0) > 0 || (hints?.length ?? 0) > 0;
   let textSource: "text" | "attributedBody" | "none" = "none";
   let text = sanitizeText(row.text);
+  if (text && text.trim().length > 0 && OBJECT_REPLACEMENT_ONLY.test(text.trim())) {
+    text = null;
+  }
   if (text && text.trim().length > 0) {
     textSource = "text";
   } else if (row.decoded_text && row.decoded_text.trim().length > 0) {
     text = sanitizeText(row.decoded_text);
+    if (text && text.trim().length > 0 && OBJECT_REPLACEMENT_ONLY.test(text.trim())) {
+      text = null;
+    }
     textSource = "attributedBody";
   } else {
     text = null;
@@ -1045,7 +1064,11 @@ function createConfiguredServer(): McpServer {
     async ({ query, chat_guid, participant, days_back, limit }) => {
       const trimmedQuery = query.trim();
       if (!trimmedQuery) {
-        return { content: textContent('{"results":[]}') };
+        const payload = { results: [] };
+        return {
+          content: textContent(JSON.stringify(payload)),
+          structuredContent: payload,
+        };
       }
       const effectiveDays = clampNumber(days_back ?? CONNECTOR_DEFAULT_DAYS_BACK, 1, 365);
       const resultLimit = clampNumber(limit ?? CONNECTOR_DEFAULT_LIMIT, 1, 50);
@@ -1054,7 +1077,11 @@ function createConfiguredServer(): McpServer {
       if (chat_guid) {
         const resolvedChatId = await getChatIdByGuid(chat_guid);
         if (resolvedChatId == null) {
-          return { content: textContent('{"results":[]}') };
+          const payload = { results: [] };
+          return {
+            content: textContent(JSON.stringify(payload)),
+            structuredContent: payload,
+          };
         }
         chatId = resolvedChatId;
       }
@@ -1118,13 +1145,18 @@ function createConfiguredServer(): McpServer {
             },
           };
         });
+        const payload = { results };
         return {
-          content: textContent(JSON.stringify({ results })),
+          content: textContent(JSON.stringify(payload)),
+          structuredContent: payload,
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        const structuredPayload = { results: [] };
+        const contentPayload = { ...structuredPayload, error: message };
         return {
-          content: textContent(JSON.stringify({ results: [], error: message })),
+          content: textContent(JSON.stringify(contentPayload)),
+          structuredContent: structuredPayload,
           isError: true,
         };
       }
@@ -1160,34 +1192,57 @@ function createConfiguredServer(): McpServer {
     },
     async ({ id, context_before, context_after }) => {
       const normalizedId = String(id).trim();
+      const before = clampNumber(context_before ?? 5, 0, 50);
+      const after = clampNumber(context_after ?? 5, 0, 50);
+      const buildErrorDocument = (errorMessage: string) => ({
+        id: normalizedId,
+        title: errorMessage,
+        text: errorMessage,
+        metadata: {
+          chat_id: null,
+          from_me: false,
+          sender: null,
+          iso_utc: null,
+          iso_local: null,
+          has_attachments: false,
+          context_before: before,
+          context_after: after,
+        },
+      });
       const numericMatch = normalizedId.match(/(\d+)$/);
       if (!numericMatch) {
+        const payload = buildErrorDocument("Invalid message identifier");
         return {
-          content: textContent(JSON.stringify({ error: "Invalid message identifier", id: normalizedId })),
+          content: textContent(JSON.stringify(payload)),
+          structuredContent: payload,
           isError: true,
         };
       }
       const rowId = Number.parseInt(numericMatch[1], 10);
       if (!Number.isFinite(rowId) || rowId <= 0) {
+        const payload = buildErrorDocument("Invalid message identifier");
         return {
-          content: textContent(JSON.stringify({ error: "Invalid message identifier", id: normalizedId })),
+          content: textContent(JSON.stringify(payload)),
+          structuredContent: payload,
           isError: true,
         };
       }
-      const before = clampNumber(context_before ?? 5, 0, 50);
-      const after = clampNumber(context_after ?? 5, 0, 50);
       const rows = await contextAroundMessage(rowId, before, after, true);
       if (!rows.length) {
+        const payload = buildErrorDocument("Message not found");
         return {
-          content: textContent(JSON.stringify({ error: "Message not found", id: normalizedId })),
+          content: textContent(JSON.stringify(payload)),
+          structuredContent: payload,
           isError: true,
         };
       }
       const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>);
       const anchor = normalized.find((msg) => msg.message_rowid === rowId);
       if (!anchor) {
+        const payload = buildErrorDocument("Message not found");
         return {
-          content: textContent(JSON.stringify({ error: "Message not found", id: normalizedId })),
+          content: textContent(JSON.stringify(payload)),
+          structuredContent: payload,
           isError: true,
         };
       }
@@ -1225,6 +1280,7 @@ function createConfiguredServer(): McpServer {
       };
       return {
         content: textContent(JSON.stringify(document)),
+        structuredContent: document,
       };
     }
   );
@@ -1589,7 +1645,7 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
         id: null,
       });
     } catch (error) {
-      console.error("HTTP transport error:", error);
+      logger.error("HTTP transport error:", error);
       res.status(500).json({
         jsonrpc: "2.0",
         error: {
@@ -1639,9 +1695,9 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
 
   return new Promise<void>((resolve) => {
     app.listen(options.port, options.host, () => {
-      console.log(`messages-app-mcp HTTP server listening on http://${options.host}:${options.port}`);
+      logger.info(`messages-app-mcp HTTP server listening on http://${options.host}:${options.port}`);
       if (options.enableSseFallback) {
-        console.log("Legacy SSE fallback enabled at /sse");
+        logger.info("Legacy SSE fallback enabled at /sse");
       }
       resolve();
     });
@@ -1703,6 +1759,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("messages-app-mcp failed:", err);
+  logger.error("messages-app-mcp failed:", err);
   process.exit(1);
 });
