@@ -14,7 +14,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 - New rotating file logger writes to `~/Library/Logs/messages-app-mcp/` (configurable via `MESSAGES_MCP_LOG_*`) and mirrors output to stdout/stderr.
-- CI enables Corepack before installing Node 22 so pnpm caching works on GitHub Actions.
+- CI enables Corepack before installing Node 22 so pnpm is available during workflow runs.
 
 ## [2.0.0] - 2025-10-03
 ### Breaking
