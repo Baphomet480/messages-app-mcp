@@ -1750,6 +1750,7 @@ async function runStdioServer(): Promise<void> {
 
 async function main() {
   const launch = parseLaunchOptions();
+  logger.info("messages-app-mcp starting", { mode: launch.mode });
   if (launch.mode === "stdio") {
     await runStdioServer();
     return;
