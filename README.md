@@ -30,6 +30,7 @@ A Model Context Protocol (MCP) server that lets AI assistants interact with macO
 - Fetch recent messages by chat, participant, or focused context windows with normalized timestamps/metadata.
 - Send messages and attachments while receiving structured JSON responses that include delivery summaries and recent history.
 - Full-text search with optional scoping and attachment hints.
+- Rotating structured logs (repo-local by default) that capture search queries, send outcomes, and errors.
 - Diagnostics via `doctor` and version metadata via the `about` tool.
 
 ## Requirements
@@ -88,14 +89,53 @@ The binary published on npm (installable via pnpm) is identical to `dist/index.j
 | `applescript_handler_template` | Generates a starter AppleScript for message events (received/sent/transfer). | Save under `~/Library/Application Scripts/com.apple.iChat/`. |
 | `search` / `fetch` | Connector-friendly tools for ChatGPT Pro / Deep Research (Streamable HTTP mode). | Emit JSON strings matching MCP connector expectations. |
 
+### Search scope & participants
+
+- **`search`** (connector) accepts `query`, optional `chat_guid`, optional `participant` (phone/email handle), `days_back` (capped at 365), and `limit`. Use it for lightweight snippets.
+- **`search_messages`** exposes the full normalized rows and lets you mix `query`, `chat_id`, `participant`, and explicit Unix ranges (`from_unix_ms`/`to_unix_ms`). Pass `from_unix_ms: 0` to scan all history or scope to a participant handle to chase a single contact.
+- **`search_messages_safe`** enforces that you provide at least one of `chat_id`, `participant`, or `days_back`, and mirrors the same structured output.
+
+Example (`search_messages` call over MCP stdio):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 42,
+  "method": "tools/call",
+  "params": {
+    "name": "search_messages",
+    "arguments": {
+      "query": "Alderaan",
+      "participant": "+14805788164",
+      "from_unix_ms": 0,
+      "limit": 5
+    }
+  }
+}
+```
+
+If a message body only exists in `attributedBody`, the MCP now decodes it into `text`/`snippet` so searches still match. Every invocation is logged (e.g. `[info] search_messages { query: 'Alderaan', participant: '+14805788164', result_count: 2 }`).
+
 ## Configuration
 
-Environment variables:
+### Logging
+
+The server initialises a rotating file logger on startup. When launched inside a git repository, logs default to `./logs/messages-app-mcp/`; otherwise they land in `~/Library/Logs/messages-app-mcp/`. Messages are mirrored to stderr, keeping stdout reserved for JSON payloads while still surfacing activity in your terminal.
+
+Tune logging with:
+
+- `MESSAGES_MCP_LOG_DIR=/absolute/path` – override the log directory entirely.
+- `MESSAGES_MCP_LOG_MAX_BYTES=5242880` – rotate once the active log exceeds this many bytes (default 5 MiB).
+- `MESSAGES_MCP_LOG_MAX_FILES=5` – number of archived files to keep.
+
+Logs note every `send_text` / `send_attachment` attempt (masked recipients), each `search*` invocation (query, scopes, result count), and any uncaught errors—handy when reproducing issues.
+
+### Runtime environment
 
 - `MESSAGES_MCP_READONLY=true` – disable `send_text`/`send_attachment` while keeping read tools enabled.
 - `MESSAGES_MCP_MASK_RECIPIENTS=true` – mask phone numbers/emails in responses.
 - `MESSAGES_MCP_HTTP_*` – configure optional Streamable HTTP transport (`PORT`, `HOST`, `ENABLE_SSE`, `CORS_ORIGINS`, etc.).
-- `MESSAGES_MCP_CONNECTOR_*` – tweak connector search behavior (days back, result limits, base URL for citations).
+- `MESSAGES_MCP_CONNECTOR_DAYS_BACK=365`, `MESSAGES_MCP_CONNECTOR_LIMIT=20` – adjust defaults for the connector-facing `search`/`fetch` tools.
 
 Grant Full Disk Access before running the server so SQLite reads succeed. Without it, `doctor` will warn and send tools will fail silently in Messages.app.
 
