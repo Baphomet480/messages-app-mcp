@@ -120,15 +120,21 @@ class RotatingFileLogger {
   }
 
   private emitToConsole(level: LogLevel, args: unknown[]): void {
+    // Always write through stderr so we never interfere with stdout-based transports (e.g. MCP stdio).
     switch (level) {
-      case "ERROR":
-        console.error(...args);
+      case "DEBUG":
+        console.error("[debug]", ...args);
+        break;
+      case "INFO":
+        console.error("[info]", ...args);
         break;
       case "WARN":
-        console.warn(...args);
+        console.error("[warn]", ...args);
         break;
+      case "ERROR":
       default:
-        console.log(...args);
+        console.error("[error]", ...args);
+        break;
     }
   }
 
