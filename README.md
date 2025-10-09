@@ -84,6 +84,7 @@ The binary published on npm (installable via pnpm) is identical to `dist/index.j
 | `send_attachment` | Sends a file (with optional caption) using the same targeting options as `send_text`. | Same envelope as `send_text`, with an optional `attachment` field. |
 | `search_messages` / `search_messages_safe` | Full-text search with scoping options and convenience defaults to avoid whole DB scans. | Safe variant enforces day-based limits automatically. |
 | `context_around_message` | Fetches a window of normalized messages around an anchor `message_rowid`. | Useful for tools that need surrounding context without large history fetches. |
+| `summarize_window` | Summarize a window of messages around an anchor rowid with participant counts and trimmed lines. | Helpful for quick recap responses without fetching full history. |
 | `get_attachments` | Resolves attachment metadata (names, MIME types, byte sizes, resolved paths) with strict per-message caps. | Always read-only. |
 | `doctor` | Structured diagnostics covering AppleScript availability, Messages services, SQLite access, and version metadata. | Returns JSON + summary string; artifacts can be collected in CI. |
 | `applescript_handler_template` | Generates a starter AppleScript for message events (received/sent/transfer). | Save under `~/Library/Application Scripts/com.apple.iChat/`. |
