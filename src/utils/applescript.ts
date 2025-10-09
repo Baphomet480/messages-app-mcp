@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { homedir } from "node:os";
-import { resolve as resolvePath, isAbsolute } from "node:path";
-import { stat } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { resolve as resolvePath, isAbsolute, join } from "node:path";
+import { stat, mkdtemp, writeFile, rm } from "node:fs/promises";
 
 export function runAppleScriptInline(script: string, args: string[] = []): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -39,7 +39,7 @@ on run argv
   end if
 
   if targetMode is not in {"recipient", "chat"} then error "Invalid target mode"
-  if payloadKind is not in {"text", "file"} then error "Invalid payload kind"
+  if payloadKind is not in {"text", "text_path", "file"} then error "Invalid payload kind"
 
   set theFile to missing value
   if payloadKind is "file" then
@@ -63,9 +63,7 @@ on run argv
         end if
       end if
 
-      if payloadKind is "text" then
-        send payloadValue to theTarget
-      else if payloadKind is "file" then
+      if payloadKind is "file" then
         if captionText is not "" then
           try
             send captionText to theTarget
@@ -74,11 +72,40 @@ on run argv
         end if
         send theFile to theTarget
       else
+        set messageText to payloadValue
+        if payloadKind is "text_path" then
+          set messageText to my readTextFile(payloadValue)
+        end if
+        send messageText to theTarget
+      else
         error "Unsupported payload kind"
       end if
     end timeout
   end tell
 end run
+
+on readTextFile(posixPath)
+  set theFile to POSIX file posixPath
+  try
+    set handleRef to open for access theFile without write permission
+    try
+      set theText to read handleRef as «class utf8»
+    on error
+      try
+        set theText to read handleRef as «class utf16»
+      on error
+        set theText to read handleRef as text
+      end try
+    end try
+    close access handleRef
+    return theText
+  on error errMsg number errNum
+    try
+      close access theFile
+    end try
+    error "Failed to read temporary text payload: " & errMsg
+  end try
+end readTextFile
 
 on locateChat(chatKey)
   if chatKey is missing value or chatKey is "" then return missing value
@@ -239,7 +266,7 @@ function resolveSendTarget(target: string | SendTarget): { mode: TargetMode; val
 }
 
 async function runSendPayload(
-  payloadKind: "text" | "file",
+  payloadKind: "text" | "text_path" | "file",
   target: string | SendTarget,
   payload: string,
   caption?: string,
@@ -256,7 +283,14 @@ export async function sendMessageAppleScript(target: string | SendTarget, text: 
   if (!text || text.trim().length === 0) {
     throw new Error("Message text must not be empty.");
   }
-  await runSendPayload("text", target, text);
+  const tempDir = await mkdtemp(join(tmpdir(), "messages-mcp-"));
+  const payloadPath = join(tempDir, "body.txt");
+  try {
+    await writeFile(payloadPath, text, { encoding: "utf8" });
+    await runSendPayload("text_path", target, payloadPath);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 function expandUserPath(rawPath: string): string {
