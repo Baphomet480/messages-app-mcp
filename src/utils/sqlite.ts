@@ -10,6 +10,7 @@ import type {
   MentionAttribute,
   ParsedMessage,
 } from "imessage-parser";
+import { normalizeParsedText, extractLongestPrintable } from "./text-utils.js";
 
 export type ChatRow = {
   chat_id: number;
@@ -174,38 +175,6 @@ async function decodeAttributedBodyHexLegacy(hex: string): Promise<string | null
   }
 }
 
-function extractLongestPrintable(buffer: Buffer): string | null {
-  let best = "";
-  let current = "";
-  const flush = () => {
-    const candidate = current.trim();
-    if (candidate.length > best.length) best = candidate;
-    current = "";
-  };
-  for (let i = 0; i < buffer.length; i += 1) {
-    const byte = buffer[i];
-    if ((byte >= 0x20 && byte <= 0x7E) || byte === 0x0A || byte === 0x0D || byte === 0x09) {
-      const ch = byte === 0x0A || byte === 0x0D || byte === 0x09 ? " " : String.fromCharCode(byte);
-      current += ch;
-    } else {
-      flush();
-    }
-  }
-  flush();
-  if (!best) return null;
-  // some attributed payloads prefix strings with formatting markers like "+=" – trim common junk.
-  return best.replace(/^[+=\s]+/, "").trim() || null;
-}
-
-function normalizeParsedText(input: string | null | undefined): string | null {
-  if (typeof input !== "string") return null;
-  const collapsed = input.replace(/\s+/g, " ").trim();
-  if (!collapsed) return null;
-  const withoutReplacement = collapsed.replace(/[\uFFFC\uFFFD]/g, "").trim();
-  if (!withoutReplacement) return null;
-  return collapsed;
-}
-
 function convertParsedMessage(parsed: ParsedMessage): ParsedAttributedBody {
   const text = normalizeParsedText(parsed.text);
   const textSource: ParsedAttributedBody["textSource"] = text ? "parser" : "none";
@@ -355,16 +324,52 @@ async function tableHasColumn(dbPath: string, table: string, column: string): Pr
 
 async function resolveHandlesForParticipant(dbPath: string, participant: string): Promise<string[]> {
   const safe = participant.replaceAll("'", "''");
-  const hasPerson = await tableHasColumn(dbPath, "handle", "person_centric_id");
-  if (hasPerson) {
-    const personRows = await runSqliteJSON(dbPath, `SELECT person_centric_id FROM handle WHERE id='${safe}' LIMIT 1;`) as Array<{ person_centric_id: string | null }>;
-    const personId = personRows[0]?.person_centric_id;
-    if (personId) {
-      const handles = await runSqliteJSON(dbPath, `SELECT id FROM handle WHERE person_centric_id='${personId}' ORDER BY id;`) as Array<{ id: string }>;
-      const list = handles.map(h => h.id).filter(Boolean);
+  const direct = await runSqliteJSON(dbPath, `
+    SELECT id, person_centric_id
+    FROM handle
+    WHERE id='${safe}' COLLATE NOCASE
+       OR uncanonicalized_id='${safe}' COLLATE NOCASE
+    LIMIT 1;
+  `) as Array<{ id: string; person_centric_id: string | null }>;
+  if (direct.length) {
+    const row = direct[0];
+    if (row.person_centric_id) {
+      const handles = await runSqliteJSON(dbPath, `
+        SELECT id
+        FROM handle
+        WHERE person_centric_id='${row.person_centric_id}'
+        ORDER BY id;
+      `) as Array<{ id: string }>;
+      const list = handles.map((h) => h.id).filter(Boolean);
       if (list.length > 0) return Array.from(new Set(list));
     }
+    if (row.id) return [row.id];
   }
+
+  const displayMatches = await runSqliteJSON(dbPath, `
+    SELECT DISTINCT h.id
+    FROM chat c
+    JOIN chat_handle_join ch ON ch.chat_id = c.ROWID
+    JOIN handle h ON h.ROWID = ch.handle_id
+    WHERE c.display_name IS NOT NULL AND c.display_name COLLATE NOCASE = '${safe}'
+    LIMIT 50;
+  `) as Array<{ id: string }>;
+  if (displayMatches.length) {
+    return Array.from(new Set(displayMatches.map((r) => r.id).filter(Boolean)));
+  }
+
+  const escaped = safe.replace(/[%_]/g, (ch) => `\\${ch}`);
+  const fuzzyHandles = await runSqliteJSON(dbPath, `
+    SELECT DISTINCT id
+    FROM handle
+    WHERE id LIKE '%${escaped}%' ESCAPE '\\' COLLATE NOCASE
+       OR uncanonicalized_id LIKE '%${escaped}%' ESCAPE '\\' COLLATE NOCASE
+    LIMIT 20;
+  `) as Array<{ id: string }>;
+  if (fuzzyHandles.length) {
+    return Array.from(new Set(fuzzyHandles.map((r) => r.id).filter(Boolean)));
+  }
+
   return [participant];
 }
 
@@ -613,11 +618,18 @@ export async function getMessagesByChatId(chatId: number, limit = 50): Promise<M
   return rows;
 }
 
-export async function getMessagesByParticipant(participant: string, limit = 50): Promise<MessageRow[]> {
+export async function getMessagesByParticipant(
+  participant: string,
+  limit = 50,
+  options: { includeAttachmentsMeta?: boolean } = {},
+): Promise<EnrichedMessageRow[]> {
   const db = getChatDbPath();
   const handles = await resolveHandlesForParticipant(db, participant);
   const quotedList = handles.map(h => `'${h.replaceAll("'", "''")}'`).join(",");
-  const select = await buildMessageSelect(db);
+  const select = await buildMessageSelect(db, {
+    includeChatId: true,
+    includeAttachmentsMeta: !!options.includeAttachmentsMeta,
+  });
   const sql = `
     WITH target_chats AS (
       SELECT DISTINCT ch.chat_id
@@ -633,8 +645,16 @@ export async function getMessagesByParticipant(participant: string, limit = 50):
     ORDER BY m.date DESC
     LIMIT ${Math.max(1, Math.min(500, limit))};`;
 
-  const rows = (await runSqliteJSON(db, sql)) as EnrichedMessageRow[];
+  const rows = (await runSqliteJSON(db, sql)) as (EnrichedMessageRow & { atts_concat?: string | null })[];
   await hydrateAttributedBodies(rows);
+  if (options.includeAttachmentsMeta) {
+    for (const row of rows) {
+      if ((row as any).atts_concat) {
+        row.attachments_meta = parseAttachmentConcat((row as any).atts_concat, 5);
+      }
+      delete (row as any).atts_concat;
+    }
+  }
   return rows;
 }
 

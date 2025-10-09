@@ -27,6 +27,8 @@ import type { MessageLike, SendTargetDescriptor, SendResultPayload } from "./uti
 import { getVersionInfo, getVersionInfoSync } from "./utils/version.js";
 import { runDoctor } from "./utils/doctor.js";
 import { getLogger } from "./utils/logger.js";
+import { normalizeMessageText, truncateForLog, estimateSegmentInfo } from "./utils/text-utils.js";
+import type { SegmentInfo } from "./utils/text-utils.js";
 import type { EnrichedMessageRow, AttachmentInfo } from "./utils/sqlite.js";
 
 const logger = getLogger();
@@ -76,14 +78,6 @@ function cleanOsaError(err: unknown): string {
   m = m.replace(/\s*\([\-\d]+\)\s*$/i, "");
   m = m.replace(/^"|"$/g, "");
   return m.trim();
-}
-
-function truncateForLog(text: string | null | undefined, max = 120): string | null {
-  if (!text) return null;
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return null;
-  if (normalized.length <= max) return normalized;
-  return `${normalized.slice(0, max - 1)}…`;
 }
 
 // Default: do NOT mask. Opt-in masking with MESSAGES_MCP_MASK_RECIPIENTS=true
@@ -191,19 +185,6 @@ async function collectRecentMessages(
 
 const OBJECT_REPLACEMENT_ONLY = /^[\uFFFC\uFFFD]+$/;
 
-function sanitizeText(s: string | null | undefined): string | null {
-  if (s == null) return null;
-  try {
-    // Normalize and strip non-printables except common whitespace
-    const n = s.normalize('NFC');
-    const cleaned = n.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
-      .replace(/[\u2028\u2029]/g, '\n');
-    return cleaned;
-  } catch {
-    return s;
-  }
-}
-
 function isReadOnly(): boolean {
   const v = process.env.MESSAGES_MCP_READONLY;
   if (!v) return false;
@@ -236,6 +217,14 @@ function parseEnvBool(name: string, fallback = false): boolean {
   if (["0", "false", "no", "off"].includes(normalized)) return false;
   return fallback;
 }
+
+const DEFAULT_SEGMENT_WARNING_THRESHOLD = 10;
+const SEGMENT_WARNING_THRESHOLD = parseEnvInt(
+  "MESSAGES_MCP_SEGMENT_WARNING",
+  DEFAULT_SEGMENT_WARNING_THRESHOLD,
+  0,
+  100,
+);
 
 function parsePort(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
@@ -327,14 +316,14 @@ function normalizeMessage(row: EnrichedMessageRow & { chat_id?: number }): Norma
   }));
   const hasAttachments = (row.has_attachments ?? 0) > 0 || (hints?.length ?? 0) > 0;
   let textSource: "text" | "attributedBody" | "none" = "none";
-  let text = sanitizeText(row.text);
+  let text = normalizeMessageText(row.text);
   if (text && text.trim().length > 0 && OBJECT_REPLACEMENT_ONLY.test(text.trim())) {
     text = null;
   }
   if (text && text.trim().length > 0) {
     textSource = "text";
   } else if (row.decoded_text && row.decoded_text.trim().length > 0) {
-    text = sanitizeText(row.decoded_text);
+    text = normalizeMessageText(row.decoded_text);
     if (text && text.trim().length > 0 && OBJECT_REPLACEMENT_ONLY.test(text.trim())) {
       text = null;
     }
@@ -486,12 +475,50 @@ const sendStandardOutputSchema = z.object({
   error: z.string().nullable().optional(),
   lookup_error: z.string().optional(),
   attachment: attachmentMetaSchema.optional(),
+  submitted_text: z.string().optional(),
+  submitted_text_length: z.number().int().nonnegative().optional(),
+  submitted_segment_count: z.number().int().nonnegative().optional(),
+  submitted_segment_encoding: z.enum(["gsm-7", "ucs-2"]).optional(),
+  submitted_segment_unit_size: z.number().int().positive().optional(),
+  submitted_segment_unit_count: z.number().int().nonnegative().optional(),
+  payload_warning: z.string().optional(),
 });
 
-function toStandardSendOutput(payload: SendResultPayload<NormalizedMessage>, extra?: { attachment?: { file_path: string | null; file_label: string | null; caption: string | null } }) {
+type SendOutputExtras = {
+  attachment?: { file_path: string | null; file_label: string | null; caption: string | null };
+  submittedText?: string;
+  submittedLength?: number;
+  segmentInfo?: SegmentInfo | null;
+  payloadWarning?: string;
+};
+
+function applySendExtras(result: Record<string, unknown>, extra?: SendOutputExtras) {
+  if (!extra) return result;
+  if (extra.attachment) {
+    result.attachment = extra.attachment;
+  }
+  if (typeof extra.submittedText === "string") {
+    result.submitted_text = extra.submittedText;
+  }
+  if (typeof extra.submittedLength === "number") {
+    result.submitted_text_length = extra.submittedLength;
+  }
+  if (extra.segmentInfo) {
+    result.submitted_segment_count = extra.segmentInfo.segments;
+    result.submitted_segment_encoding = extra.segmentInfo.encoding;
+    result.submitted_segment_unit_size = extra.segmentInfo.segmentSize;
+    result.submitted_segment_unit_count = extra.segmentInfo.unitCount;
+  }
+  if (extra.payloadWarning) {
+    result.payload_warning = extra.payloadWarning;
+  }
+  return result;
+}
+
+function toStandardSendOutput(payload: SendResultPayload<NormalizedMessage>, extra?: SendOutputExtras) {
   if ((payload as any).status === "sent") {
     const p = payload as any;
-    return {
+    const base: Record<string, unknown> = {
       ok: true,
       summary: p.summary,
       target: p.target,
@@ -499,11 +526,11 @@ function toStandardSendOutput(payload: SendResultPayload<NormalizedMessage>, ext
       latest_message: p.latest_message ?? null,
       recent_messages: p.recent_messages ?? [],
       lookup_error: p.lookup_error,
-      attachment: extra?.attachment,
     };
+    return applySendExtras(base, extra);
   }
   const p = payload as any;
-  return {
+  const base: Record<string, unknown> = {
     ok: false,
     summary: p.summary,
     target: p.target,
@@ -512,8 +539,8 @@ function toStandardSendOutput(payload: SendResultPayload<NormalizedMessage>, ext
     recent_messages: [],
     error: p.error,
     lookup_error: p.lookup_error,
-    attachment: extra?.attachment,
   };
+  return applySendExtras(base, extra);
 }
 
 function normalizeAttachment(info: AttachmentInfo) {
@@ -660,7 +687,19 @@ function createConfiguredServer(): McpServer {
             messages,
             lookupError,
           });
-          const std = toStandardSendOutput(payload);
+          const segmentInfo = estimateSegmentInfo(text);
+          const textLength = Array.from(text).length;
+          let payloadWarning: string | undefined;
+          if (SEGMENT_WARNING_THRESHOLD > 0 && segmentInfo.segments > SEGMENT_WARNING_THRESHOLD) {
+            const unitLabel = segmentInfo.encoding === "gsm-7" ? "GSM-7 units" : "code points";
+            payloadWarning = `Text spans ${segmentInfo.segments} segments (${segmentInfo.unitCount} ${unitLabel}); consider splitting to stay within ${SEGMENT_WARNING_THRESHOLD} segments for reliable delivery.`;
+          }
+          const std = toStandardSendOutput(payload, {
+            submittedText: text,
+            submittedLength: textLength,
+            segmentInfo,
+            payloadWarning,
+          });
           logger.info("send_text success", {
             target: targetDescriptor.display,
             recipient: maskRecipient(recipient ?? ""),
@@ -668,17 +707,35 @@ function createConfiguredServer(): McpServer {
             message_preview: truncateForLog(text),
             latest_message_id: payload.latest_message?.message_rowid ?? null,
             lookup_error: lookupError ?? null,
+            submitted_segment_count: segmentInfo.segments,
+            submitted_segment_encoding: segmentInfo.encoding,
+            payload_warning: payloadWarning ?? null,
           });
           return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std };
         } catch (e) {
           const reason = cleanOsaError(e);
           const failure = buildSendFailurePayload(targetDescriptor, reason);
-          const std = toStandardSendOutput(failure);
+          const segmentInfo = estimateSegmentInfo(text);
+          const textLength = Array.from(text).length;
+          let payloadWarning: string | undefined;
+          if (SEGMENT_WARNING_THRESHOLD > 0 && segmentInfo.segments > SEGMENT_WARNING_THRESHOLD) {
+            const unitLabel = segmentInfo.encoding === "gsm-7" ? "GSM-7 units" : "code points";
+            payloadWarning = `Text spans ${segmentInfo.segments} segments (${segmentInfo.unitCount} ${unitLabel}); consider splitting to stay within ${SEGMENT_WARNING_THRESHOLD} segments for reliable delivery.`;
+          }
+          const std = toStandardSendOutput(failure, {
+            submittedText: text,
+            submittedLength: textLength,
+            segmentInfo,
+            payloadWarning,
+          });
           logger.error("send_text failed", {
             target: targetDescriptor.display,
             recipient: maskRecipient(recipient ?? ""),
             error: reason,
             message_preview: truncateForLog(text),
+            submitted_segment_count: segmentInfo.segments,
+            submitted_segment_encoding: segmentInfo.encoding,
+            payload_warning: payloadWarning ?? null,
           });
           return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
         }
@@ -995,6 +1052,48 @@ function createConfiguredServer(): McpServer {
         };
       } catch (e) {
         const msg = `Failed to query messages. Confirm Messages access (Full Disk Access) and that Messages is running at least once. Error: ${(e as Error).message}`;
+        return { content: textContent(msg), isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    "recent_messages_by_participant",
+    {
+      description: "Return the most recent normalized messages for a participant handle (phone/email).",
+      inputSchema: {
+        participant: z.string().min(1),
+        limit: z.number().int().min(1).max(500).default(50),
+        include_attachments_meta: z.boolean().optional(),
+      },
+      outputSchema: {
+        messages: z.array(normalizedMessageSchema)
+      }
+    },
+    async ({ participant, limit, include_attachments_meta }) => {
+      try {
+        const rows = await getMessagesByParticipant(participant, limit, {
+          includeAttachmentsMeta: !!include_attachments_meta,
+        });
+        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>);
+        logger.info("recent_messages_by_participant", {
+          participant,
+          masked_participant: maskRecipient(participant),
+          limit,
+          result_count: normalized.length,
+        });
+        return {
+          content: textContent(JSON.stringify(normalized, null, 2)),
+          structuredContent: { messages: normalized },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const msg = `Failed to retrieve messages for participant. Error: ${message}`;
+        logger.error("recent_messages_by_participant failed", {
+          participant,
+          masked_participant: maskRecipient(participant),
+          error: message,
+        });
         return { content: textContent(msg), isError: true };
       }
     }
@@ -1800,14 +1899,71 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
     });
   }
 
-  return new Promise<void>((resolve) => {
-    app.listen(options.port, options.host, () => {
-      logger.info(`messages-app-mcp HTTP server listening on http://${options.host}:${options.port}`);
-      if (options.enableSseFallback) {
-        logger.info("Legacy SSE fallback enabled at /sse");
-      }
+  // Keep the HTTP launch path alive until the server is explicitly closed.
+  return new Promise<void>((resolve, reject) => {
+    let server: ReturnType<typeof app.listen> | null = null;
+    try {
+      server = app.listen(options.port, options.host, () => {
+        logger.info(`messages-app-mcp HTTP server listening on http://${options.host}:${options.port}`);
+        if (options.enableSseFallback) {
+          logger.info("Legacy SSE fallback enabled at /sse");
+        }
+      });
+    } catch (error) {
+      logger.error("HTTP server failed to start", error);
+      reject(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+
+    let settled = false;
+
+    function cleanup() {
+      if (!server) return;
+      process.removeListener("SIGINT", shutdown);
+      process.removeListener("SIGTERM", shutdown);
+      server.off("close", onClose);
+      server.off("error", onError);
+      server = null;
+    }
+
+    function settleResolve() {
+      if (settled) return;
+      settled = true;
+      cleanup();
       resolve();
-    });
+    }
+
+    function settleReject(error?: Error) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error ?? new Error("HTTP server failed"));
+    }
+
+    function onClose() {
+      settleResolve();
+    }
+
+    function onError(error: Error) {
+      logger.error("HTTP server error", error);
+      settleReject(error);
+    }
+
+    function shutdown() {
+      if (settled || !server) return;
+      server.close((err) => {
+        if (err) {
+          onError(err);
+        } else {
+          onClose();
+        }
+      });
+    }
+
+    server.on("close", onClose);
+    server.on("error", onError);
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
   });
 }
 

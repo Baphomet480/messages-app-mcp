@@ -13,16 +13,24 @@ const statMock = vi.fn(async () => ({
   isFile: () => true,
 }));
 
+const mkdtempMock = vi.fn(async () => "/tmp/messages-mcp-abc");
+const writeFileMock = vi.fn(async () => {});
+const rmMock = vi.fn(async () => {});
+
 vi.mock("node:child_process", () => ({
   execFile: (...args: Parameters<typeof defaultExecImplementation>) => execFileMock(...args),
 }));
 
 vi.mock("node:fs/promises", () => ({
   stat: (...args: Parameters<typeof statMock>) => statMock(...args),
+  mkdtemp: (...args: Parameters<typeof mkdtempMock>) => mkdtempMock(...args),
+  writeFile: (...args: Parameters<typeof writeFileMock>) => writeFileMock(...args),
+  rm: (...args: Parameters<typeof rmMock>) => rmMock(...args),
 }));
 
 vi.mock("node:os", () => ({
   homedir: () => "/Users/tester",
+  tmpdir: () => "/tmp",
 }));
 
 vi.mock("node:path", async () => {
@@ -43,6 +51,10 @@ beforeEach(() => {
   statMock.mockResolvedValue({
     isFile: () => true,
   });
+  mkdtempMock.mockReset();
+  mkdtempMock.mockResolvedValue("/tmp/messages-mcp-xyz");
+  writeFileMock.mockReset();
+  rmMock.mockReset();
 });
 
 describe("sendMessageAppleScript", () => {
@@ -53,6 +65,7 @@ describe("sendMessageAppleScript", () => {
   });
 
   it("invokes osascript with recipient mode for string targets", async () => {
+    mkdtempMock.mockResolvedValueOnce("/tmp/messages-mcp-123");
     await sendMessageAppleScript("  +15550000000  ", " Hello there ");
 
     expect(execFileMock).toHaveBeenCalledTimes(1);
@@ -61,10 +74,13 @@ describe("sendMessageAppleScript", () => {
     expect(args[0]).toBe("-l");
     expect(args[1]).toBe("AppleScript");
     expect(args[3]).toContain("on run argv");
-    expect(args.slice(-4)).toEqual(["text", "recipient", "+15550000000", " Hello there "]);
+    expect(args.slice(-4)).toEqual(["text_path", "recipient", "+15550000000", "/tmp/messages-mcp-123/body.txt"]);
+    expect(writeFileMock).toHaveBeenCalledWith("/tmp/messages-mcp-123/body.txt", " Hello there ", { encoding: "utf8" });
+    expect(rmMock).toHaveBeenCalledWith("/tmp/messages-mcp-123", { recursive: true, force: true });
   });
 
   it("prefers chat identifiers when provided", async () => {
+    mkdtempMock.mockResolvedValueOnce("/tmp/messages-mcp-456");
     await sendMessageAppleScript(
       { chatGuid: "chat123", chatName: "Ignore" },
       "ping",
@@ -72,7 +88,7 @@ describe("sendMessageAppleScript", () => {
 
     const callArgs = execFileMock.mock.calls[0]!;
     const args = callArgs[1] as string[];
-    expect(args.slice(-4)).toEqual(["text", "chat", "chat123", "ping"]);
+    expect(args.slice(-4)).toEqual(["text_path", "chat", "chat123", "/tmp/messages-mcp-456/body.txt"]);
   });
 });
 
