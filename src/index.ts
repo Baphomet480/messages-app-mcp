@@ -723,10 +723,10 @@ function createConfiguredServer(): McpServer {
         outputSchema: sendStandardOutputSchema.shape,
       },
       async ({ recipient, chat_guid, chat_name, file_path, caption }) => {
+        const base = { recipient, chat_guid, chat_name };
+        const trimmedPath = file_path?.trim?.() ?? file_path;
         try {
-          const base = { recipient, chat_guid, chat_name };
           const target = buildSendTarget(base);
-          const trimmedPath = file_path?.trim?.() ?? file_path;
           await sendAttachmentAppleScript(target, trimmedPath, caption);
           const targetDescriptor = buildTargetDescriptor(base);
 
@@ -760,7 +760,6 @@ function createConfiguredServer(): McpServer {
           });
           return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std };
         } catch (e) {
-          const base = { recipient, chat_guid, chat_name };
           const targetDescriptor = buildTargetDescriptor(base);
           const reason =
             e instanceof Error && e.message === MESSAGES_FDA_HINT

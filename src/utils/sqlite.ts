@@ -168,14 +168,46 @@ async function decodeAttributedBodyHexLegacy(hex: string): Promise<string | null
     };
     visit(data);
     const sorted = strings.sort((a, b) => b.length - a.length);
-    return sorted[0] || null;
+    return sorted[0] || extractLongestPrintable(buf);
   } catch {
-    return null;
+    return extractLongestPrintable(Buffer.from(hex, "hex"));
   }
 }
 
+function extractLongestPrintable(buffer: Buffer): string | null {
+  let best = "";
+  let current = "";
+  const flush = () => {
+    const candidate = current.trim();
+    if (candidate.length > best.length) best = candidate;
+    current = "";
+  };
+  for (let i = 0; i < buffer.length; i += 1) {
+    const byte = buffer[i];
+    if ((byte >= 0x20 && byte <= 0x7E) || byte === 0x0A || byte === 0x0D || byte === 0x09) {
+      const ch = byte === 0x0A || byte === 0x0D || byte === 0x09 ? " " : String.fromCharCode(byte);
+      current += ch;
+    } else {
+      flush();
+    }
+  }
+  flush();
+  if (!best) return null;
+  // some attributed payloads prefix strings with formatting markers like "+=" – trim common junk.
+  return best.replace(/^[+=\s]+/, "").trim() || null;
+}
+
+function normalizeParsedText(input: string | null | undefined): string | null {
+  if (typeof input !== "string") return null;
+  const collapsed = input.replace(/\s+/g, " ").trim();
+  if (!collapsed) return null;
+  const withoutReplacement = collapsed.replace(/[\uFFFC\uFFFD]/g, "").trim();
+  if (!withoutReplacement) return null;
+  return collapsed;
+}
+
 function convertParsedMessage(parsed: ParsedMessage): ParsedAttributedBody {
-  const text = parsed.text?.trim().length ? parsed.text : null;
+  const text = normalizeParsedText(parsed.text);
   const textSource: ParsedAttributedBody["textSource"] = text ? "parser" : "none";
   const attachments: AttributedAttachmentHint[] = (parsed.attributes?.attachments || []).map((att: AttachmentAttribute) => ({
     guid: att.guid,
