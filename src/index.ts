@@ -78,6 +78,14 @@ function cleanOsaError(err: unknown): string {
   return m.trim();
 }
 
+function truncateForLog(text: string | null | undefined, max = 120): string | null {
+  if (!text) return null;
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, max - 1)}…`;
+}
+
 // Default: do NOT mask. Opt-in masking with MESSAGES_MCP_MASK_RECIPIENTS=true
 function shouldMask(): boolean {
   const v = process.env.MESSAGES_MCP_MASK_RECIPIENTS;
@@ -621,6 +629,10 @@ function createConfiguredServer(): McpServer {
         }
         const targetDescriptor = buildTargetDescriptor(base);
         const failure = buildSendFailurePayload(targetDescriptor, "Read-only mode is enabled.");
+        logger.warn("send_text skipped in read-only mode", {
+          target: targetDescriptor.display,
+          recipient: maskRecipient(recipient ?? ""),
+        });
         const std = toStandardSendOutput(failure);
         return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
       }
@@ -649,11 +661,25 @@ function createConfiguredServer(): McpServer {
             lookupError,
           });
           const std = toStandardSendOutput(payload);
+          logger.info("send_text success", {
+            target: targetDescriptor.display,
+            recipient: maskRecipient(recipient ?? ""),
+            chat_id: chatId ?? null,
+            message_preview: truncateForLog(text),
+            latest_message_id: payload.latest_message?.message_rowid ?? null,
+            lookup_error: lookupError ?? null,
+          });
           return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std };
         } catch (e) {
           const reason = cleanOsaError(e);
           const failure = buildSendFailurePayload(targetDescriptor, reason);
           const std = toStandardSendOutput(failure);
+          logger.error("send_text failed", {
+            target: targetDescriptor.display,
+            recipient: maskRecipient(recipient ?? ""),
+            error: reason,
+            message_preview: truncateForLog(text),
+          });
           return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
         }
       }
@@ -679,6 +705,10 @@ function createConfiguredServer(): McpServer {
         }
         const targetDescriptor = buildTargetDescriptor(base);
         const failure = buildSendFailurePayload(targetDescriptor, "Read-only mode is enabled.");
+        logger.warn("send_attachment skipped in read-only mode", {
+          target: targetDescriptor.display,
+          recipient: maskRecipient(recipient ?? ""),
+        });
         const std = toStandardSendOutput(failure);
         return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
       }
@@ -719,6 +749,15 @@ function createConfiguredServer(): McpServer {
               caption: caption?.trim?.() ?? null,
             },
           });
+          logger.info("send_attachment success", {
+            target: targetDescriptor.display,
+            recipient: maskRecipient(recipient ?? ""),
+            chat_id: chatId ?? null,
+            file_label: fileLabel,
+            caption_preview: truncateForLog(caption),
+            latest_message_id: basePayload.latest_message?.message_rowid ?? null,
+            lookup_error: lookupError ?? null,
+          });
           return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std };
         } catch (e) {
           const base = { recipient, chat_guid, chat_name };
@@ -730,6 +769,13 @@ function createConfiguredServer(): McpServer {
           const summary = `Failed to send attachment to ${targetDescriptor.display}. ${reason}`.trim();
           const failure = buildSendFailurePayload(targetDescriptor, reason, { summary });
           const std = toStandardSendOutput(failure);
+          logger.error("send_attachment failed", {
+            target: targetDescriptor.display,
+            recipient: maskRecipient(recipient ?? ""),
+            error: reason,
+            file_path: trimmedPath ?? null,
+            caption_preview: truncateForLog(caption),
+          });
           return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
         }
       }
@@ -978,6 +1024,10 @@ function createConfiguredServer(): McpServer {
     },
     async (input) => {
       if (input.chat_id == null && !input.participant && input.from_unix_ms == null && input.to_unix_ms == null) {
+        logger.warn("search_messages rejected", {
+          query: input.query,
+          reason: "missing_scope_filters",
+        });
         return {
           content: textContent("Provide chat_id, participant, or from/to unix filters when searching to avoid full-database scans."),
           isError: true,
@@ -1014,6 +1064,16 @@ function createConfiguredServer(): McpServer {
           const chatId = msg.chat_id ?? chatLookup.get(msg.message_rowid) ?? 0;
           return { ...msg, chat_id: chatId, snippet };
         });
+        logger.info("search_messages", {
+          query: input.query,
+          chat_id: input.chat_id ?? null,
+          participant: input.participant ?? null,
+          from_unix_ms: input.from_unix_ms ?? null,
+          to_unix_ms: input.to_unix_ms ?? null,
+          limit: input.limit,
+          offset: input.offset,
+          result_count: mapped.length,
+        });
         return {
           content: textContent(JSON.stringify(mapped, null, 2)),
           structuredContent: { results: mapped },
@@ -1021,12 +1081,24 @@ function createConfiguredServer(): McpServer {
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         if (/scope filter/i.test(message) || /requires at least one scope/i.test(message)) {
+          logger.warn("search_messages rejected", {
+            query: input.query,
+            reason: message,
+          });
           return {
             content: textContent("Provide chat_id, participant, or from/to unix filters when searching to avoid full-database scans."),
             isError: true,
           };
         }
         const msg = `Failed to search messages. Verify Full Disk Access and try narrowing your filters. Error: ${message}`;
+        logger.error("search_messages failed", {
+          query: input.query,
+          chat_id: input.chat_id ?? null,
+          participant: input.participant ?? null,
+          from_unix_ms: input.from_unix_ms ?? null,
+          to_unix_ms: input.to_unix_ms ?? null,
+          error: message,
+        });
         return { content: textContent(msg), isError: true };
       }
   }
@@ -1146,6 +1218,14 @@ function createConfiguredServer(): McpServer {
           };
         });
         const payload = { results };
+        logger.info("search tool", {
+          query: trimmedQuery,
+          chat_guid: chat_guid ?? null,
+          participant: participant ?? null,
+          days_back: effectiveDays,
+          limit: resultLimit,
+          result_count: results.length,
+        });
         return {
           content: textContent(JSON.stringify(payload)),
           structuredContent: payload,
@@ -1154,6 +1234,14 @@ function createConfiguredServer(): McpServer {
         const message = error instanceof Error ? error.message : String(error);
         const structuredPayload = { results: [] };
         const contentPayload = { ...structuredPayload, error: message };
+        logger.error("search tool failed", {
+          query: trimmedQuery,
+          chat_guid: chat_guid ?? null,
+          participant: participant ?? null,
+          days_back: effectiveDays,
+          limit: resultLimit,
+          error: message,
+        });
         return {
           content: textContent(JSON.stringify(contentPayload)),
           structuredContent: structuredPayload,
@@ -1360,6 +1448,10 @@ function createConfiguredServer(): McpServer {
     },
     async (input) => {
       if (input.chat_id == null && !input.participant && !(input.days_back && input.days_back > 0)) {
+        logger.warn("search_messages_safe rejected", {
+          query: input.query,
+          reason: "missing_scope_filters",
+        });
         return { content: textContent("Provide chat_id, participant, or days_back."), isError: true };
       }
       const now = Date.now();
@@ -1395,6 +1487,15 @@ function createConfiguredServer(): McpServer {
           const chatId = msg.chat_id ?? chatLookup.get(msg.message_rowid) ?? 0;
           return { ...msg, chat_id: chatId, snippet };
         });
+        logger.info("search_messages_safe", {
+          query: input.query,
+          chat_id: input.chat_id ?? null,
+          participant: input.participant ?? null,
+          days_back: input.days_back ?? null,
+          limit: input.limit,
+          offset: input.offset,
+          result_count: mapped.length,
+        });
         return {
           content: textContent(JSON.stringify(mapped, null, 2)),
           structuredContent: { results: mapped },
@@ -1402,6 +1503,13 @@ function createConfiguredServer(): McpServer {
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         const msg = `Failed to search messages safely. Error: ${message}`;
+        logger.error("search_messages_safe failed", {
+          query: input.query,
+          chat_id: input.chat_id ?? null,
+          participant: input.participant ?? null,
+          days_back: input.days_back ?? null,
+          error: message,
+        });
         return { content: textContent(msg), isError: true };
       }
     }
