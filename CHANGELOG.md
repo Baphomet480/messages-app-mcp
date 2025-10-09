@@ -14,7 +14,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 - New rotating file logger writes to `~/Library/Logs/messages-app-mcp/` (configurable via `MESSAGES_MCP_LOG_*`) and mirrors output to stdout/stderr.
-- CI enables Corepack before installing Node 22 so pnpm is available during workflow runs.
+- CI and release workflows enable Corepack before installing dependencies so pnpm is available during automation.
 - When launched inside a git repository, logs default to `<repo>/logs/messages-app-mcp/`, falling back to the standard user log directory otherwise.
 
 ## [2.0.0] - 2025-10-03
