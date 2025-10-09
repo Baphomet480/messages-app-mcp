@@ -1822,14 +1822,71 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
     });
   }
 
-  return new Promise<void>((resolve) => {
-    app.listen(options.port, options.host, () => {
-      logger.info(`messages-app-mcp HTTP server listening on http://${options.host}:${options.port}`);
-      if (options.enableSseFallback) {
-        logger.info("Legacy SSE fallback enabled at /sse");
-      }
+  // Keep the HTTP launch path alive until the server is explicitly closed.
+  return new Promise<void>((resolve, reject) => {
+    let server: ReturnType<typeof app.listen> | null = null;
+    try {
+      server = app.listen(options.port, options.host, () => {
+        logger.info(`messages-app-mcp HTTP server listening on http://${options.host}:${options.port}`);
+        if (options.enableSseFallback) {
+          logger.info("Legacy SSE fallback enabled at /sse");
+        }
+      });
+    } catch (error) {
+      logger.error("HTTP server failed to start", error);
+      reject(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+
+    let settled = false;
+
+    function cleanup() {
+      if (!server) return;
+      process.removeListener("SIGINT", shutdown);
+      process.removeListener("SIGTERM", shutdown);
+      server.off("close", onClose);
+      server.off("error", onError);
+      server = null;
+    }
+
+    function settleResolve() {
+      if (settled) return;
+      settled = true;
+      cleanup();
       resolve();
-    });
+    }
+
+    function settleReject(error?: Error) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error ?? new Error("HTTP server failed"));
+    }
+
+    function onClose() {
+      settleResolve();
+    }
+
+    function onError(error: Error) {
+      logger.error("HTTP server error", error);
+      settleReject(error);
+    }
+
+    function shutdown() {
+      if (settled || !server) return;
+      server.close((err) => {
+        if (err) {
+          onError(err);
+        } else {
+          onClose();
+        }
+      });
+    }
+
+    server.on("close", onClose);
+    server.on("error", onError);
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
   });
 }
 
