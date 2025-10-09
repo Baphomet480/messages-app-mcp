@@ -93,8 +93,8 @@ The binary published on npm (installable via pnpm) is identical to `dist/index.j
 
 ### Search scope & participants
 
-- **`search`** (connector) accepts `query`, optional `chat_guid`, optional `participant` (phone/email handle), `days_back` (capped at 365), and `limit`. Use it for lightweight snippets.
-- **`search_messages`** exposes the full normalized rows and lets you mix `query`, `chat_id`, `participant`, and explicit Unix ranges (`from_unix_ms`/`to_unix_ms`). Pass `from_unix_ms: 0` to scan all history or scope to a participant handle to chase a single contact.
+- **`search`** (connector) accepts `query`, optional `chat_guid`, optional `participant` (phone/email handle *or* chat display name), `days_back` (capped at 365), and `limit`. Use it for lightweight snippets.
+- **`search_messages`** exposes the full normalized rows and lets you mix `query`, `chat_id`, `participant`, and explicit Unix ranges (`from_unix_ms`/`to_unix_ms`). Pass `from_unix_ms: 0` to scan all history or scope to a participant handle/display name to chase a single contact.
 - **`search_messages_safe`** enforces that you provide at least one of `chat_id`, `participant`, or `days_back`, and mirrors the same structured output.
 
 Example (`search_messages` call over MCP stdio):

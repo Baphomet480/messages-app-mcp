@@ -324,16 +324,52 @@ async function tableHasColumn(dbPath: string, table: string, column: string): Pr
 
 async function resolveHandlesForParticipant(dbPath: string, participant: string): Promise<string[]> {
   const safe = participant.replaceAll("'", "''");
-  const hasPerson = await tableHasColumn(dbPath, "handle", "person_centric_id");
-  if (hasPerson) {
-    const personRows = await runSqliteJSON(dbPath, `SELECT person_centric_id FROM handle WHERE id='${safe}' LIMIT 1;`) as Array<{ person_centric_id: string | null }>;
-    const personId = personRows[0]?.person_centric_id;
-    if (personId) {
-      const handles = await runSqliteJSON(dbPath, `SELECT id FROM handle WHERE person_centric_id='${personId}' ORDER BY id;`) as Array<{ id: string }>;
-      const list = handles.map(h => h.id).filter(Boolean);
+  const direct = await runSqliteJSON(dbPath, `
+    SELECT id, person_centric_id
+    FROM handle
+    WHERE id='${safe}' COLLATE NOCASE
+       OR uncanonicalized_id='${safe}' COLLATE NOCASE
+    LIMIT 1;
+  `) as Array<{ id: string; person_centric_id: string | null }>;
+  if (direct.length) {
+    const row = direct[0];
+    if (row.person_centric_id) {
+      const handles = await runSqliteJSON(dbPath, `
+        SELECT id
+        FROM handle
+        WHERE person_centric_id='${row.person_centric_id}'
+        ORDER BY id;
+      `) as Array<{ id: string }>;
+      const list = handles.map((h) => h.id).filter(Boolean);
       if (list.length > 0) return Array.from(new Set(list));
     }
+    if (row.id) return [row.id];
   }
+
+  const displayMatches = await runSqliteJSON(dbPath, `
+    SELECT DISTINCT h.id
+    FROM chat c
+    JOIN chat_handle_join ch ON ch.chat_id = c.ROWID
+    JOIN handle h ON h.ROWID = ch.handle_id
+    WHERE c.display_name IS NOT NULL AND c.display_name COLLATE NOCASE = '${safe}'
+    LIMIT 50;
+  `) as Array<{ id: string }>;
+  if (displayMatches.length) {
+    return Array.from(new Set(displayMatches.map((r) => r.id).filter(Boolean)));
+  }
+
+  const escaped = safe.replace(/[%_]/g, (ch) => `\\${ch}`);
+  const fuzzyHandles = await runSqliteJSON(dbPath, `
+    SELECT DISTINCT id
+    FROM handle
+    WHERE id LIKE '%${escaped}%' ESCAPE '\\' COLLATE NOCASE
+       OR uncanonicalized_id LIKE '%${escaped}%' ESCAPE '\\' COLLATE NOCASE
+    LIMIT 20;
+  `) as Array<{ id: string }>;
+  if (fuzzyHandles.length) {
+    return Array.from(new Set(fuzzyHandles.map((r) => r.id).filter(Boolean)));
+  }
+
   return [participant];
 }
 

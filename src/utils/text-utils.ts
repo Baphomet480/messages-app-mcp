@@ -20,7 +20,7 @@ export function normalizeMessageText(input: string | null | undefined): string |
   if (!collapsed) return null;
   const withoutReplacement = collapsed.replace(REPLACEMENT_CHARS_REGEX, "").trim();
   if (!withoutReplacement) return null;
-  return collapsed;
+  return withoutReplacement;
 }
 
 export function truncateForLog(value: string | null | undefined, max = 120): string | null {
