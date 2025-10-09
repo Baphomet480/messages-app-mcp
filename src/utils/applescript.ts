@@ -71,7 +71,7 @@ on run argv
           end try
         end if
         send theFile to theTarget
-      else
+      else if payloadKind is "text_path" or payloadKind is "text" then
         set messageText to payloadValue
         if payloadKind is "text_path" then
           set messageText to my readTextFile(payloadValue)

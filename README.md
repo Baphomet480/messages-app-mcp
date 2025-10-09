@@ -45,6 +45,7 @@ A Model Context Protocol (MCP) server that lets AI assistants interact with macO
 pnpm install
 pnpm run build
 pnpm start # stdio MCP server
+pnpm run start:http # optional: run HTTP/SSE MCP server on http://127.0.0.1:3338/mcp
 ```
 
 During development you can run `pnpm run dev` (ts-node) and use the MCP Inspector:
@@ -117,6 +118,34 @@ Example (`search_messages` call over MCP stdio):
 ```
 
 If a message body only exists in `attributedBody`, the MCP now decodes it into `text`/`snippet` so searches still match. Every invocation is logged (e.g. `[info] search_messages { query: 'Alderaan', participant: '+14805788164', result_count: 2 }`).
+
+### Running over Streamable HTTP / SSE
+
+Codex CLI v0.46+ can talk to this server over the [streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) transport. To try it locally:
+
+1. Start the HTTP server:
+
+   ```bash
+   pnpm run build
+   pnpm run start:http
+   ```
+
+   This listens on `http://127.0.0.1:3338/mcp` and enables the SSE fallback under `/sse`.
+
+2. Update `~/.codex/config.toml`:
+
+   ```toml
+   experimental_use_rmcp_client = true
+
+   [mcp_servers.messages]
+   url = "http://127.0.0.1:3338/mcp"
+   startup_timeout_sec = 20
+   tool_timeout_sec = 60
+   ```
+
+3. Restart Codex CLI. The HTTP server can run in a separate terminal or under a process manager.
+
+The legacy stdio transport (`pnpm start`) remains available if you prefer Codex to launch the server automatically.
 
 ## Configuration
 
