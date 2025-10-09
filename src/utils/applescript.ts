@@ -88,7 +88,11 @@ on readTextFile(posixPath)
   set theFile to POSIX file posixPath
   try
     set handleRef to open for access theFile without write permission
-    set theText to read handleRef as string
+    try
+      set theText to read handleRef as «class utf8»
+    on error
+      set theText to read handleRef as Unicode text
+    end try
     close access handleRef
     return theText
   on error errMsg number errNum
