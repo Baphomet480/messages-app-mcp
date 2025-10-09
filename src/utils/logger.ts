@@ -179,3 +179,8 @@ export function getLogger(options?: LoggerOptions) {
   }
   return sharedLogger;
 }
+
+// Exposed for unit tests to isolate logger state.
+export function __resetLoggerForTests(): void {
+  sharedLogger = undefined;
+}
