@@ -23,10 +23,21 @@ import {
   getChatIdByParticipant,
 } from "./utils/sqlite.js";
 import { buildSendFailurePayload, buildSendSuccessPayload } from "./utils/send-result.js";
-import type { MessageLike, SendTargetDescriptor } from "./utils/send-result.js";
-import { getVersionInfo } from "./utils/version.js";
+import type { MessageLike, SendTargetDescriptor, SendResultPayload } from "./utils/send-result.js";
+import { getVersionInfo, getVersionInfoSync } from "./utils/version.js";
 import { runDoctor } from "./utils/doctor.js";
+import { getLogger } from "./utils/logger.js";
 import type { EnrichedMessageRow, AttachmentInfo } from "./utils/sqlite.js";
+
+const logger = getLogger();
+
+process.on("unhandledRejection", (reason) => {
+  logger.error("Unhandled rejection", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  logger.error("Uncaught exception", error);
+});
 
 function textContent(text: string) {
   return [{ type: "text", text } as const];
@@ -170,6 +181,8 @@ async function collectRecentMessages(
   return { chatId, messages, lookupError };
 }
 
+const OBJECT_REPLACEMENT_ONLY = /^[\uFFFC\uFFFD]+$/;
+
 function sanitizeText(s: string | null | undefined): string | null {
   if (s == null) return null;
   try {
@@ -307,10 +320,16 @@ function normalizeMessage(row: EnrichedMessageRow & { chat_id?: number }): Norma
   const hasAttachments = (row.has_attachments ?? 0) > 0 || (hints?.length ?? 0) > 0;
   let textSource: "text" | "attributedBody" | "none" = "none";
   let text = sanitizeText(row.text);
+  if (text && text.trim().length > 0 && OBJECT_REPLACEMENT_ONLY.test(text.trim())) {
+    text = null;
+  }
   if (text && text.trim().length > 0) {
     textSource = "text";
   } else if (row.decoded_text && row.decoded_text.trim().length > 0) {
     text = sanitizeText(row.decoded_text);
+    if (text && text.trim().length > 0 && OBJECT_REPLACEMENT_ONLY.test(text.trim())) {
+      text = null;
+    }
     textSource = "attributedBody";
   } else {
     text = null;
@@ -416,6 +435,79 @@ const attachmentRecordSchema = z.object({
   created_iso_local: z.string().nullable(),
 });
 
+// Send result schemas for tool self-description
+const sendTargetDescriptorSchema = z.object({
+  recipient: z.string().nullable(),
+  chat_guid: z.string().nullable(),
+  chat_name: z.string().nullable(),
+  display: z.string(),
+});
+
+const sendSuccessSchema = z.object({
+  status: z.literal("sent"),
+  summary: z.string(),
+  target: sendTargetDescriptorSchema,
+  chat_id: z.number().nullable().optional(),
+  latest_message: normalizedMessageSchema.nullable().optional(),
+  recent_messages: z.array(normalizedMessageSchema).optional(),
+  lookup_error: z.string().optional(),
+});
+
+const sendFailureSchema = z.object({
+  status: z.literal("failed"),
+  summary: z.string(),
+  target: sendTargetDescriptorSchema,
+  error: z.string(),
+});
+
+
+const attachmentMetaSchema = z.object({
+  file_path: z.string().nullable(),
+  file_label: z.string().nullable(),
+  caption: z.string().nullable(),
+});
+
+// Note: MCP outputSchema prefers a single object shape; use permissive object with optional fields
+const sendStandardOutputSchema = z.object({
+  ok: z.boolean(),
+  summary: z.string(),
+  target: sendTargetDescriptorSchema,
+  chat_id: z.number().nullable().optional(),
+  latest_message: normalizedMessageSchema.nullable().optional(),
+  recent_messages: z.array(normalizedMessageSchema).optional(),
+  error: z.string().nullable().optional(),
+  lookup_error: z.string().optional(),
+  attachment: attachmentMetaSchema.optional(),
+});
+
+function toStandardSendOutput(payload: SendResultPayload<NormalizedMessage>, extra?: { attachment?: { file_path: string | null; file_label: string | null; caption: string | null } }) {
+  if ((payload as any).status === "sent") {
+    const p = payload as any;
+    return {
+      ok: true,
+      summary: p.summary,
+      target: p.target,
+      chat_id: p.chat_id ?? null,
+      latest_message: p.latest_message ?? null,
+      recent_messages: p.recent_messages ?? [],
+      lookup_error: p.lookup_error,
+      attachment: extra?.attachment,
+    };
+  }
+  const p = payload as any;
+  return {
+    ok: false,
+    summary: p.summary,
+    target: p.target,
+    chat_id: null,
+    latest_message: null,
+    recent_messages: [],
+    error: p.error,
+    lookup_error: p.lookup_error,
+    attachment: extra?.attachment,
+  };
+}
+
 function normalizeAttachment(info: AttachmentInfo) {
   const unix = info.created_unix_ms ?? null;
   return {
@@ -432,10 +524,32 @@ function normalizeAttachment(info: AttachmentInfo) {
   };
 }
 
+const SERVER_INSTRUCTIONS = [
+  "messages-app-mcp bridges macOS Messages.app to MCP clients.",
+  "",
+  "Core tools:",
+  "- list_chats / get_messages / context_around_message: browse conversation history with attachment metadata.",
+  "- send_text / send_attachment: deliver new messages when MESSAGES_MCP_READONLY is not set.",
+  "- search_messages / search_messages_safe / search: scoped full-text search utilities with connector-friendly output.",
+  "- doctor: verifies AppleScript, Full Disk Access, and accounts before sending.",
+  "- about: returns version, git commit, and runtime environment.",
+  "",
+  "Grant Full Disk Access to the invoking shell so chat.db can be read and attachments can be sent.",
+].join("\n");
+
 function createConfiguredServer(): McpServer {
+  const versionInfo = getVersionInfoSync();
   const server = new McpServer(
-    { name: "messages-app-mcp", version: "0.1.0" },
-    {}
+    {
+      name: versionInfo.name,
+      title: "Messages.app MCP Server",
+      version: versionInfo.version,
+      description: "Expose macOS Messages history, search, and sending flows over MCP.",
+      websiteUrl: "https://github.com/Baphomet480/messages-app-mcp",
+    },
+    {
+      instructions: SERVER_INSTRUCTIONS,
+    }
   );
 
   const sendTextInputSchema = {
@@ -489,10 +603,14 @@ function createConfiguredServer(): McpServer {
 
   // send_text tool
   if (READ_ONLY_MODE) {
-    server.tool(
+    server.registerTool(
       "send_text",
-      "Send a text/iMessage via Messages.app to a phone number or email.",
-      sendTextInputSchema,
+      {
+        title: "Send Text",
+        description: "Send a text/iMessage via Messages.app to a phone number or email.",
+        inputSchema: sendTextInputSchema,
+        outputSchema: sendStandardOutputSchema.shape,
+      },
       async ({ recipient, chat_guid, chat_name }) => {
         const base = { recipient, chat_guid, chat_name };
         if (!hasTarget(base)) {
@@ -501,18 +619,21 @@ function createConfiguredServer(): McpServer {
             isError: true,
           };
         }
-        const shown = describeSendTarget(base);
-        return {
-          content: textContent(`Read-only mode is enabled; did not send to ${shown}.`),
-          isError: true,
-        };
+        const targetDescriptor = buildTargetDescriptor(base);
+        const failure = buildSendFailurePayload(targetDescriptor, "Read-only mode is enabled.");
+        const std = toStandardSendOutput(failure);
+        return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
       }
     );
   } else {
-    server.tool(
+    server.registerTool(
       "send_text",
-      "Send a text/iMessage via Messages.app to a phone number or email.",
-      sendTextInputSchema,
+      {
+        title: "Send Text",
+        description: "Send a text/iMessage via Messages.app to a phone number or email.",
+        inputSchema: sendTextInputSchema,
+        outputSchema: sendStandardOutputSchema.shape,
+      },
       async ({ recipient, chat_guid, chat_name, text }) => {
         const base = { recipient, chat_guid, chat_name };
         const targetDescriptor = buildTargetDescriptor(base);
@@ -527,29 +648,27 @@ function createConfiguredServer(): McpServer {
             messages,
             lookupError,
           });
-          const jsonText = JSON.stringify(payload, null, 2);
-          return {
-            content: textContent(jsonText),
-            structuredContent: payload,
-          };
+          const std = toStandardSendOutput(payload);
+          return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std };
         } catch (e) {
           const reason = cleanOsaError(e);
-          const payload = buildSendFailurePayload(targetDescriptor, reason);
-          return {
-            content: textContent(JSON.stringify(payload, null, 2)),
-            structuredContent: payload,
-            isError: true,
-          };
+          const failure = buildSendFailurePayload(targetDescriptor, reason);
+          const std = toStandardSendOutput(failure);
+          return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
         }
       }
     );
   }
 
   if (READ_ONLY_MODE) {
-    server.tool(
+    server.registerTool(
       "send_attachment",
-      "Send an attachment via Messages.app to a recipient or existing chat.",
-      sendAttachmentInputSchema,
+      {
+        title: "Send Attachment",
+        description: "Send an attachment via Messages.app to a recipient or existing chat.",
+        inputSchema: sendAttachmentInputSchema,
+        outputSchema: sendStandardOutputSchema.shape,
+      },
       async ({ recipient, chat_guid, chat_name }) => {
         const base = { recipient, chat_guid, chat_name };
         if (!hasTarget(base)) {
@@ -558,18 +677,21 @@ function createConfiguredServer(): McpServer {
             isError: true,
           };
         }
-        const shown = describeSendTarget(base);
-        return {
-          content: textContent(`Read-only mode is enabled; did not send attachment to ${shown}.`),
-          isError: true,
-        };
+        const targetDescriptor = buildTargetDescriptor(base);
+        const failure = buildSendFailurePayload(targetDescriptor, "Read-only mode is enabled.");
+        const std = toStandardSendOutput(failure);
+        return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
       }
     );
   } else {
-    server.tool(
+    server.registerTool(
       "send_attachment",
-      "Send an attachment via Messages.app to a recipient or existing chat.",
-      sendAttachmentInputSchema,
+      {
+        title: "Send Attachment",
+        description: "Send an attachment via Messages.app to a recipient or existing chat.",
+        inputSchema: sendAttachmentInputSchema,
+        outputSchema: sendStandardOutputSchema.shape,
+      },
       async ({ recipient, chat_guid, chat_name, file_path, caption }) => {
         try {
           const base = { recipient, chat_guid, chat_name };
@@ -590,18 +712,14 @@ function createConfiguredServer(): McpServer {
             lookupError,
             summary,
           });
-          const payload = {
-            ...basePayload,
+          const std = toStandardSendOutput(basePayload, {
             attachment: {
               file_path: trimmedPath ?? null,
               file_label: fileLabel,
               caption: caption?.trim?.() ?? null,
             },
-          };
-          return {
-            content: textContent(JSON.stringify(payload, null, 2)),
-            structuredContent: payload,
-          };
+          });
+          return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std };
         } catch (e) {
           const base = { recipient, chat_guid, chat_name };
           const targetDescriptor = buildTargetDescriptor(base);
@@ -610,28 +728,26 @@ function createConfiguredServer(): McpServer {
               ? e.message
               : cleanOsaError(e);
           const summary = `Failed to send attachment to ${targetDescriptor.display}. ${reason}`.trim();
-          const payload = buildSendFailurePayload(targetDescriptor, reason, { summary });
-          return {
-            content: textContent(JSON.stringify(payload, null, 2)),
-            structuredContent: payload,
-            isError: true,
-          };
+          const failure = buildSendFailurePayload(targetDescriptor, reason, { summary });
+          const std = toStandardSendOutput(failure);
+          return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
         }
       }
     );
   }
 
-  server.tool(
+  server.registerTool(
     "applescript_handler_template",
-    "Return a starter AppleScript script for Messages event handlers (message received/sent, transfer invitation).",
     {
-      minimal: z.boolean().optional().describe("Set true to omit inline comments."),
+      title: "AppleScript Handler Template",
+      description: "Return a starter AppleScript for Messages event handlers (message received/sent, file transfer).",
+      inputSchema: { minimal: z.boolean().optional().describe("Set true to omit inline comments.") },
+      outputSchema: { script: z.string() },
     },
     async ({ minimal }) => {
       const script = renderHandlerTemplate(Boolean(minimal));
-      return {
-        content: textContent(`Save this AppleScript as ~/Library/Application Scripts/com.apple.iChat/messages-mcp.scpt and enable scripting in Messages.\n\n${script}`),
-      };
+      const msg = `Save this AppleScript as ~/Library/Application Scripts/com.apple.iChat/messages-mcp.scpt and enable scripting in Messages.\n\n${script}`;
+      return { content: textContent(msg), structuredContent: { script } };
     }
   );
 
@@ -929,11 +1045,30 @@ function createConfiguredServer(): McpServer {
         days_back: z.number().int().min(1).max(365).optional().describe("How many days of history to include (default from env)."),
         limit: z.number().int().min(1).max(50).optional().describe("Maximum number of documents to return."),
       },
+      outputSchema: {
+        results: z.array(z.object({
+          id: z.string(),
+          title: z.string(),
+          url: z.string().optional(),
+          snippet: z.string(),
+          metadata: z.object({
+            chat_id: z.number().nullable(),
+            from_me: z.boolean(),
+            sender: z.string().nullable(),
+            iso_utc: z.string().nullable(),
+            iso_local: z.string().nullable(),
+          }),
+        })),
+      },
     },
     async ({ query, chat_guid, participant, days_back, limit }) => {
       const trimmedQuery = query.trim();
       if (!trimmedQuery) {
-        return { content: textContent('{"results":[]}') };
+        const payload = { results: [] };
+        return {
+          content: textContent(JSON.stringify(payload)),
+          structuredContent: payload,
+        };
       }
       const effectiveDays = clampNumber(days_back ?? CONNECTOR_DEFAULT_DAYS_BACK, 1, 365);
       const resultLimit = clampNumber(limit ?? CONNECTOR_DEFAULT_LIMIT, 1, 50);
@@ -942,7 +1077,11 @@ function createConfiguredServer(): McpServer {
       if (chat_guid) {
         const resolvedChatId = await getChatIdByGuid(chat_guid);
         if (resolvedChatId == null) {
-          return { content: textContent('{"results":[]}') };
+          const payload = { results: [] };
+          return {
+            content: textContent(JSON.stringify(payload)),
+            structuredContent: payload,
+          };
         }
         chatId = resolvedChatId;
       }
@@ -1006,13 +1145,18 @@ function createConfiguredServer(): McpServer {
             },
           };
         });
+        const payload = { results };
         return {
-          content: textContent(JSON.stringify({ results })),
+          content: textContent(JSON.stringify(payload)),
+          structuredContent: payload,
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        const structuredPayload = { results: [] };
+        const contentPayload = { ...structuredPayload, error: message };
         return {
-          content: textContent(JSON.stringify({ results: [], error: message })),
+          content: textContent(JSON.stringify(contentPayload)),
+          structuredContent: structuredPayload,
           isError: true,
         };
       }
@@ -1029,37 +1173,76 @@ function createConfiguredServer(): McpServer {
         context_before: z.number().int().min(0).max(50).default(5).optional().describe("How many messages before to include in text."),
         context_after: z.number().int().min(0).max(50).default(5).optional().describe("How many messages after to include in text."),
       },
+      outputSchema: {
+        id: z.string(),
+        title: z.string(),
+        text: z.string(),
+        url: z.string().optional(),
+        metadata: z.object({
+          chat_id: z.number().nullable(),
+          from_me: z.boolean(),
+          sender: z.string().nullable(),
+          iso_utc: z.string().nullable(),
+          iso_local: z.string().nullable(),
+          has_attachments: z.boolean(),
+          context_before: z.number(),
+          context_after: z.number(),
+        }),
+      },
     },
     async ({ id, context_before, context_after }) => {
       const normalizedId = String(id).trim();
+      const before = clampNumber(context_before ?? 5, 0, 50);
+      const after = clampNumber(context_after ?? 5, 0, 50);
+      const buildErrorDocument = (errorMessage: string) => ({
+        id: normalizedId,
+        title: errorMessage,
+        text: errorMessage,
+        metadata: {
+          chat_id: null,
+          from_me: false,
+          sender: null,
+          iso_utc: null,
+          iso_local: null,
+          has_attachments: false,
+          context_before: before,
+          context_after: after,
+        },
+      });
       const numericMatch = normalizedId.match(/(\d+)$/);
       if (!numericMatch) {
+        const payload = buildErrorDocument("Invalid message identifier");
         return {
-          content: textContent(JSON.stringify({ error: "Invalid message identifier", id: normalizedId })),
+          content: textContent(JSON.stringify(payload)),
+          structuredContent: payload,
           isError: true,
         };
       }
       const rowId = Number.parseInt(numericMatch[1], 10);
       if (!Number.isFinite(rowId) || rowId <= 0) {
+        const payload = buildErrorDocument("Invalid message identifier");
         return {
-          content: textContent(JSON.stringify({ error: "Invalid message identifier", id: normalizedId })),
+          content: textContent(JSON.stringify(payload)),
+          structuredContent: payload,
           isError: true,
         };
       }
-      const before = clampNumber(context_before ?? 5, 0, 50);
-      const after = clampNumber(context_after ?? 5, 0, 50);
       const rows = await contextAroundMessage(rowId, before, after, true);
       if (!rows.length) {
+        const payload = buildErrorDocument("Message not found");
         return {
-          content: textContent(JSON.stringify({ error: "Message not found", id: normalizedId })),
+          content: textContent(JSON.stringify(payload)),
+          structuredContent: payload,
           isError: true,
         };
       }
       const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>);
       const anchor = normalized.find((msg) => msg.message_rowid === rowId);
       if (!anchor) {
+        const payload = buildErrorDocument("Message not found");
         return {
-          content: textContent(JSON.stringify({ error: "Message not found", id: normalizedId })),
+          content: textContent(JSON.stringify(payload)),
+          structuredContent: payload,
           isError: true,
         };
       }
@@ -1097,6 +1280,7 @@ function createConfiguredServer(): McpServer {
       };
       return {
         content: textContent(JSON.stringify(document)),
+        structuredContent: document,
       };
     }
   );
@@ -1461,7 +1645,7 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
         id: null,
       });
     } catch (error) {
-      console.error("HTTP transport error:", error);
+      logger.error("HTTP transport error:", error);
       res.status(500).json({
         jsonrpc: "2.0",
         error: {
@@ -1511,9 +1695,9 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
 
   return new Promise<void>((resolve) => {
     app.listen(options.port, options.host, () => {
-      console.log(`messages-app-mcp HTTP server listening on http://${options.host}:${options.port}`);
+      logger.info(`messages-app-mcp HTTP server listening on http://${options.host}:${options.port}`);
       if (options.enableSseFallback) {
-        console.log("Legacy SSE fallback enabled at /sse");
+        logger.info("Legacy SSE fallback enabled at /sse");
       }
       resolve();
     });
@@ -1575,6 +1759,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("messages-app-mcp failed:", err);
+  logger.error("messages-app-mcp failed:", err);
   process.exit(1);
 });

@@ -1,6 +1,6 @@
 {
   "name": "messages-app-mcp",
-  "version": "1.1.0",
+  "version": "2.0.1",
   "description": "Model Context Protocol server for macOS Messages.app (list chats, read history, send messages)",
   "type": "module",
   "main": "dist/index.js",
@@ -15,10 +15,17 @@
     "send": "node scripts/send.mjs",
     "doctor": "node scripts/doctor.mjs",
     "doctor:json": "node scripts/doctor.mjs --json",
-    "inspector": "npx @modelcontextprotocol/inspector node dist/index.js",
-    "prepare": "npm run build"
+    "inspector": "pnpm dlx @modelcontextprotocol/inspector node dist/index.js",
+    "prepare": "pnpm run build"
   },
-  "keywords": [],
+  "keywords": [
+    "model-context-protocol",
+    "mcp",
+    "messages",
+    "imessage",
+    "sms",
+    "apple"
+  ],
   "author": "Matthias",
   "license": "MIT",
   "homepage": "https://github.com/Baphomet480/messages-app-mcp#readme",
@@ -33,14 +40,6 @@
     "dist",
     "LICENSE",
     "README.md"
-  ],
-  "keywords": [
-    "model-context-protocol",
-    "mcp",
-    "messages",
-    "imessage",
-    "sms",
-    "apple"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",
@@ -57,5 +56,14 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
+  },
+  "pnpm": {
+    "allowedBuiltDependencies": [
+      "esbuild",
+      "sqlite3"
+    ],
+    "onlyBuiltDependencies": [
+      "sqlite3"
+    ]
   }
 }

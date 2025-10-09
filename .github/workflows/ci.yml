@@ -13,28 +13,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Enable Corepack
+        run: corepack enable
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
 
       - name: Install dependencies
-        run: npm ci
-
-      - name: Run unit tests
-        run: npm test --silent
+        run: pnpm install --frozen-lockfile
 
       - name: Build
-        run: npm run build --silent
+        run: pnpm run build
+
+      - name: Run tests
+        run: pnpm test
 
       - name: Doctor (diagnostics only)
         id: doctor
         run: |
           set -e
-          # Run doctor and capture JSON; environment on CI likely lacks Messages services
-          npm run build --silent
-          npm run doctor:json > doctor-report.json || true
+          pnpm run build
+          pnpm run doctor:json > doctor-report.json || true
           echo "Doctor JSON written to doctor-report.json"
         env:
           NODE_ENV: test

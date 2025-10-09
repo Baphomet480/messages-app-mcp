@@ -34,43 +34,43 @@ A Model Context Protocol (MCP) server that lets AI assistants interact with macO
 
 ## Requirements
 
-- macOS with Messages.app configured (and opened at least once).
+- macOS with Messages.app configured (and opened at least once). Verified on macOS 26.0.1 (Sequoia); earlier releases should work as long as Messages.app exposes `chat.db`.
 - Node.js 18 or newer (tested on Node 22 in CI).
 - Terminal/iTerm (or whichever shell runs the server) must have **Full Disk Access** to read Messages data.
 
 ## Quick Start
 
 ```bash
-npm install
-npm run build
-npm start # stdio MCP server
+pnpm install
+pnpm run build
+pnpm start # stdio MCP server
 ```
 
-During development you can run `npm run dev` (ts-node) and use the MCP Inspector:
+During development you can run `pnpm run dev` (ts-node) and use the MCP Inspector:
 
 ```bash
-npm run inspector
+pnpm run inspector
 ```
 
 Helper scripts:
 
-- `npm run send -- "+1XXXXXXXXXX" "Hello"` – send a quick test message.
-- `npm run doctor` / `npm run doctor -- --json` – verify prerequisites.
+- `pnpm run send -- "+1XXXXXXXXXX" "Hello"` – send a quick test message.
+- `pnpm run doctor` / `pnpm run doctor -- --json` – verify prerequisites.
 
-### Install via npm / npx
+### Install via pnpm
 
-Once a release is published to npm you can install or run the package directly:
+Once a release is published to the npm registry you can install or run the package directly with pnpm:
 
 ```bash
 # one-shot usage
-npx messages-mcp --help
+pnpm dlx messages-mcp --help
 
 # or install globally
-npm install -g messages-app-mcp
+pnpm add -g messages-app-mcp
 messages-mcp --help
 ```
 
-The binary exposed by npm is identical to `dist/index.js`; all runtime requirements (Full Disk Access, Node 18+) still apply.
+The binary published on npm (installable via pnpm) is identical to `dist/index.js`; all runtime requirements (Full Disk Access, Node 18+) still apply.
 
 ## Tool Reference
 
@@ -79,8 +79,8 @@ The binary exposed by npm is identical to `dist/index.js`; all runtime requireme
 | `about` | Returns version/build metadata, repository links, and runtime environment info. | Surface this in clients to confirm the deployed build. |
 | `list_chats` | Lists recent chats with participants, unread counts, and last-activity timestamps (Apple epoch converted to UNIX/ISO). | Supports filters: `limit`, `participant`, `updated_after_unix_ms`, `unread_only`. |
 | `get_messages` | Retrieves normalized message rows by `chat_id` or `participant`, optionally with contextual windows and attachment metadata. | Structured payload includes ISO timestamps, message types, and optional context bundle. |
-| `send_text` | Sends text to a recipient/chat and returns structured JSON with target metadata, latest/recent messages, and any lookup errors. | Honors `MESSAGES_MCP_READONLY`; response always includes a human-readable summary inside the JSON. |
-| `send_attachment` | Sends a file (with optional caption) using the same targeting options as `send_text`. | Structured JSON includes attachment details + recent history. |
+| `send_text` | Sends text to a recipient/chat and returns a single-envelope JSON result with `ok`, `summary`, target, and recent messages. | Honors `MESSAGES_MCP_READONLY`; always returns the same envelope shape with `ok: false` on failure. |
+| `send_attachment` | Sends a file (with optional caption) using the same targeting options as `send_text`. | Same envelope as `send_text`, with an optional `attachment` field. |
 | `search_messages` / `search_messages_safe` | Full-text search with scoping options and convenience defaults to avoid whole DB scans. | Safe variant enforces day-based limits automatically. |
 | `context_around_message` | Fetches a window of normalized messages around an anchor `message_rowid`. | Useful for tools that need surrounding context without large history fetches. |
 | `get_attachments` | Resolves attachment metadata (names, MIME types, byte sizes, resolved paths) with strict per-message caps. | Always read-only. |
@@ -101,31 +101,89 @@ Grant Full Disk Access before running the server so SQLite reads succeed. Withou
 
 ## Versioning & Support
 
-- The current package version is tracked in `package.json` (now `1.1.0`).
+- The current package version is tracked in `package.json` (current: `2.0.0`).
 - The `about` and `doctor` tools expose the deployed version, git commit (when available), repository, and runtime information—ideal for client dashboards.
 - Use semantic versioning: bump the minor version for new features, patch for fixes, and major if you introduce breaking changes to tool schemas.
 
 ## Development
 
-- `npm run dev` starts the stdio server via ts-node.
-- `npm run build` compiles TypeScript to `dist/`; run `npm start` to execute the compiled build.
-- An MCP Inspector session can be launched with `npm run inspector`.
-- Scripts are documented in `package.json`; use `npm run send` or `npm run doctor` for quick manual checks.
+- `pnpm run dev` starts the stdio server via ts-node.
+- `pnpm run build` compiles TypeScript to `dist/`; run `pnpm start` to execute the compiled build.
+- An MCP Inspector session can be launched with `pnpm run inspector`.
+- Scripts are documented in `package.json`; use `pnpm run send` or `pnpm run doctor` for quick manual checks.
 
 ## Testing
 
-- `npm test` runs Vitest with coverage (see `tests/utils/*.spec.ts`).
+- `pnpm test` runs Vitest with coverage (see `tests/utils/*.spec.ts`).
 - Focus tests on edge cases: mixed chat schemas, Apple epoch conversions, structured response shapes.
 - CI (GitHub Actions, macOS) runs install → test → build → doctor; keep workflows green before cutting a release.
 
 ## Release Process
 
-1. Ensure `npm run build` and `npm test` pass locally.
+1. Ensure `pnpm run build` and `pnpm test` pass locally.
 2. Update documentation (this README, `CONTRIBUTING.md`) if tool contracts change.
 3. Bump `package.json` and mention the change in your commit message/PR.
 4. Tag releases after merging to `main`; the `about` tool will automatically reflect the new version and commit hash.
-5. Publish to npm with `npm publish --access public` (or rely on the GitHub Actions release workflow which publishes when an `v*` tag is pushed and `NPM_TOKEN` is configured).
+5. Publish to npm with `pnpm publish --access public` (or rely on the GitHub Actions release workflow which publishes when an `v*` tag is pushed and `NPM_TOKEN` is configured).
 6. **Recommended dry run:** create a pre-release tag (e.g., `v1.1.0-rc1`) without `NPM_TOKEN` set to confirm the workflow completes build/test and exercises the “skip publish” path before cutting a public release.
+
+## Tool Output Shapes (Stable)
+
+To improve MCP client compatibility, mutating tools now use a single stable JSON envelope. Search/reader tools continue to use `{ results }` or structured documents.
+
+### Send tools (breaking change in 1.x)
+
+Both `send_text` and `send_attachment` return:
+
+```json
+{
+  "ok": true,
+  "summary": "Sent message to +1•••0000.",
+  "target": {
+    "recipient": "+15550000000",
+    "chat_guid": null,
+    "chat_name": null,
+    "display": "+1•••0000"
+  },
+  "chat_id": 123,
+  "latest_message": { /* normalized message */ },
+  "recent_messages": [ /* normalized messages */ ],
+  "lookup_error": null,
+  "attachment": {
+    "file_path": "/Users/me/Desktop/file.png",
+    "file_label": "file.png",
+    "caption": "optional caption"
+  }
+}
+```
+
+On failure, the same shape is returned with `ok: false` and `error` populated, while other fields may be null/omitted:
+
+```json
+{
+  "ok": false,
+  "summary": "Failed to send to +1•••0000. Permission denied",
+  "target": { "recipient": "+15550000000", "chat_guid": null, "chat_name": null, "display": "+1•••0000" },
+  "error": "Permission denied"
+}
+```
+
+### Search (connectors) output
+
+`search` returns `{ "results": [ { id, title, url?, snippet, metadata{ chat_id, from_me, sender, iso_utc, iso_local } } ] }` and `fetch` returns a structured document `{ id, title, text, url?, metadata{ ... } }` suitable for connectors.
+
+### Reader outputs
+
+- `list_chats`: `{ chats: [...] }`
+- `get_messages`: `{ summary, messages, context? }`
+- `context_around_message`: `{ messages: [...] }`
+- `get_attachments`: `{ attachments: [...] }`
+- `search_messages`/`search_messages_safe`: `{ results: [...] }`
+
+### Diagnostics
+
+- `doctor`: detailed environment object (see tool definition)
+- `about`: version + repo metadata (see tool definition)
 
 ## Security Notes
 
@@ -155,8 +213,8 @@ These snippets show how to connect common MCP clients:
 {
   "mcpServers": {
     "messages": {
-      "command": "npx",
-      "args": ["messages-mcp"]
+      "command": "pnpm",
+      "args": ["dlx", "messages-mcp"]
     }
   }
 }
@@ -179,9 +237,9 @@ These snippets show how to connect common MCP clients:
 **Direct CLI session**
 
 ```bash
-npx messages-mcp --help
+pnpm dlx messages-mcp --help
 # or run the stdio server manually
-eval "$(npm prefix)/bin/messages-mcp"
+pnpm dlx messages-mcp
 ```
 
 For HTTP transport, launch `node dist/index.js --http --port 3333 --cors-origin https://chat.openai.com` and point the client at the resulting base URL.
