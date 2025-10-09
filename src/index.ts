@@ -980,6 +980,48 @@ function createConfiguredServer(): McpServer {
     }
   );
 
+  server.registerTool(
+    "recent_messages_by_participant",
+    {
+      description: "Return the most recent normalized messages for a participant handle (phone/email).",
+      inputSchema: {
+        participant: z.string().min(1),
+        limit: z.number().int().min(1).max(500).default(50),
+        include_attachments_meta: z.boolean().optional(),
+      },
+      outputSchema: {
+        messages: z.array(normalizedMessageSchema)
+      }
+    },
+    async ({ participant, limit, include_attachments_meta }) => {
+      try {
+        const rows = await getMessagesByParticipant(participant, limit, {
+          includeAttachmentsMeta: !!include_attachments_meta,
+        });
+        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>);
+        logger.info("recent_messages_by_participant", {
+          participant,
+          masked_participant: maskRecipient(participant),
+          limit,
+          result_count: normalized.length,
+        });
+        return {
+          content: textContent(JSON.stringify(normalized, null, 2)),
+          structuredContent: { messages: normalized },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const msg = `Failed to retrieve messages for participant. Error: ${message}`;
+        logger.error("recent_messages_by_participant failed", {
+          participant,
+          masked_participant: maskRecipient(participant),
+          error: message,
+        });
+        return { content: textContent(msg), isError: true };
+      }
+    }
+  );
+
   // search_messages tool
   server.registerTool(
     "search_messages",

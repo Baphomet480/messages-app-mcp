@@ -582,11 +582,18 @@ export async function getMessagesByChatId(chatId: number, limit = 50): Promise<M
   return rows;
 }
 
-export async function getMessagesByParticipant(participant: string, limit = 50): Promise<MessageRow[]> {
+export async function getMessagesByParticipant(
+  participant: string,
+  limit = 50,
+  options: { includeAttachmentsMeta?: boolean } = {},
+): Promise<EnrichedMessageRow[]> {
   const db = getChatDbPath();
   const handles = await resolveHandlesForParticipant(db, participant);
   const quotedList = handles.map(h => `'${h.replaceAll("'", "''")}'`).join(",");
-  const select = await buildMessageSelect(db);
+  const select = await buildMessageSelect(db, {
+    includeChatId: true,
+    includeAttachmentsMeta: !!options.includeAttachmentsMeta,
+  });
   const sql = `
     WITH target_chats AS (
       SELECT DISTINCT ch.chat_id
@@ -602,8 +609,16 @@ export async function getMessagesByParticipant(participant: string, limit = 50):
     ORDER BY m.date DESC
     LIMIT ${Math.max(1, Math.min(500, limit))};`;
 
-  const rows = (await runSqliteJSON(db, sql)) as EnrichedMessageRow[];
+  const rows = (await runSqliteJSON(db, sql)) as (EnrichedMessageRow & { atts_concat?: string | null })[];
   await hydrateAttributedBodies(rows);
+  if (options.includeAttachmentsMeta) {
+    for (const row of rows) {
+      if ((row as any).atts_concat) {
+        row.attachments_meta = parseAttachmentConcat((row as any).atts_concat, 5);
+      }
+      delete (row as any).atts_concat;
+    }
+  }
   return rows;
 }
 
