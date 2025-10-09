@@ -82,7 +82,7 @@ The binary published on npm (installable via pnpm) is identical to `dist/index.j
 | `list_chats` | Lists recent chats with participants, unread counts, and last-activity timestamps (Apple epoch converted to UNIX/ISO). | Supports filters: `limit`, `participant`, `updated_after_unix_ms`, `unread_only`. |
 | `get_messages` | Retrieves normalized message rows by `chat_id` or `participant`, optionally with contextual windows and attachment metadata. | Structured payload includes ISO timestamps, message types, and optional context bundle. |
 | `recent_messages_by_participant` | Returns the most recent normalized messages for a participant handle (phone or email). | Use when you want the latest conversation history without providing a text query. |
-| `send_text` | Sends text to a recipient/chat and returns a single-envelope JSON result with `ok`, `summary`, target, and recent messages. | Honors `MESSAGES_MCP_READONLY`; always returns the same envelope shape with `ok: false` on failure. |
+| `send_text` | Sends text to a recipient/chat and returns a single-envelope JSON result with `ok`, `summary`, target, recent messages, and the original payload/segment metadata. | Honors `MESSAGES_MCP_READONLY`; always returns the same envelope shape with `ok: false` on failure. |
 | `send_attachment` | Sends a file (with optional caption) using the same targeting options as `send_text`. | Same envelope as `send_text`, with an optional `attachment` field. |
 | `search_messages` / `search_messages_safe` | Full-text search with scoping options and convenience defaults to avoid whole DB scans. | Safe variant enforces day-based limits automatically. |
 | `context_around_message` | Fetches a window of normalized messages around an anchor `message_rowid`. | Useful for tools that need surrounding context without large history fetches. |
@@ -164,6 +164,7 @@ Logs note every `send_text` / `send_attachment` attempt (masked recipients), eac
 ### Runtime environment
 
 - `MESSAGES_MCP_READONLY=true` – disable `send_text`/`send_attachment` while keeping read tools enabled.
+- `MESSAGES_MCP_SEGMENT_WARNING=10` – emit `payload_warning` when a text spans more than this many segments (set to `0` to disable).
 - `MESSAGES_MCP_MASK_RECIPIENTS=true` – mask phone numbers/emails in responses.
 - `MESSAGES_MCP_HTTP_*` – configure optional Streamable HTTP transport (`PORT`, `HOST`, `ENABLE_SSE`, `CORS_ORIGINS`, etc.).
 - `MESSAGES_MCP_CONNECTOR_DAYS_BACK=365`, `MESSAGES_MCP_CONNECTOR_LIMIT=20` – adjust defaults for the connector-facing `search`/`fetch` tools.
@@ -224,7 +225,14 @@ Both `send_text` and `send_attachment` return:
     "file_path": "/Users/me/Desktop/file.png",
     "file_label": "file.png",
     "caption": "optional caption"
-  }
+  },
+  "submitted_text": "Full status update that was sent.",
+  "submitted_text_length": 75,
+  "submitted_segment_count": 1,
+  "submitted_segment_encoding": "gsm-7",
+  "submitted_segment_unit_count": 75,
+  "submitted_segment_unit_size": 160,
+  "payload_warning": null
 }
 ```
 
@@ -238,6 +246,14 @@ On failure, the same shape is returned with `ok: false` and `error` populated, w
   "error": "Permission denied"
 }
 ```
+
+#### Payload sizing & diagnostics
+
+- The server analyses each submitted text with GSM-7/UCS-2 rules to compute segments. Anything above **10 segments** (≈ 1,530 GSM characters or ≈ 670 Unicode code points) produces a `payload_warning` so automations can split or trim proactively.
+- All warnings and segment counts are included in `submitted_segment_*` fields alongside the original `submitted_text`, enabling callers to assert that the payload they generated is what Messages.app received.
+- You can raise/lower the warning threshold (or disable it) with `MESSAGES_MCP_SEGMENT_WARNING`. Set it to `0` to suppress warnings altogether.
+- Emoji and other non-GSM characters are fully supported—they switch the encoding to `ucs-2`, appear in the returned text, and count toward the Unicode segment math.
+- `send_attachment` continues to support files plus optional captions; use `get_attachments` to inspect attachment metadata after delivery. Message reactions are read-only today (visible via history tools) and cannot be sent programmatically yet.
 
 ### Search (connectors) output
 

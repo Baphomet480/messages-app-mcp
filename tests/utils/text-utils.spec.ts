@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { normalizeMessageText, truncateForLog, extractLongestPrintable } from "../../src/utils/text-utils.js";
+import {
+  normalizeMessageText,
+  truncateForLog,
+  extractLongestPrintable,
+  estimateSegmentInfo,
+} from "../../src/utils/text-utils.js";
 
 describe("text-utils", () => {
   it("normalizes whitespace and strips replacement glyphs", () => {
@@ -23,5 +28,28 @@ describe("text-utils", () => {
       Buffer.from([0x00]),
     ]);
     expect(extractLongestPrintable(buffer)).toBe("Hello World!");
+  });
+
+  it("estimates segments for GSM-7 text", () => {
+    const info = estimateSegmentInfo("Hello world");
+    expect(info.encoding).toBe("gsm-7");
+    expect(info.segments).toBe(1);
+    expect(info.unitCount).toBe(11);
+    expect(info.segmentSize).toBe(160);
+  });
+
+  it("uses concatenated gsm segment size when threshold exceeded", () => {
+    const info = estimateSegmentInfo("a".repeat(161));
+    expect(info.encoding).toBe("gsm-7");
+    expect(info.segments).toBe(2);
+    expect(info.segmentSize).toBe(153);
+  });
+
+  it("falls back to UCS-2 for emoji and counts code points", () => {
+    const info = estimateSegmentInfo("hello 😊");
+    expect(info.encoding).toBe("ucs-2");
+    expect(info.segments).toBe(1);
+    expect(info.segmentSize).toBe(70);
+    expect(info.unitCount).toBe(7);
   });
 });
