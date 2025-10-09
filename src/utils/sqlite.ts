@@ -733,10 +733,10 @@ export async function searchMessages(opts: SearchOptions): Promise<(SearchMessag
     ORDER BY m.date DESC
     LIMIT ${limit} OFFSET ${offset};`;
 
-  const rows = (await runSqliteJSON(db, sql)) as (EnrichedMessageRow & { chat_id: number; atts_concat?: string | null })[];
-  await hydrateAttributedBodies(rows);
+  const baseRows = (await runSqliteJSON(db, sql)) as (EnrichedMessageRow & { chat_id: number; atts_concat?: string | null })[];
+  await hydrateAttributedBodies(baseRows);
   if (opts.includeAttachmentsMeta) {
-    for (const r of rows) {
+    for (const r of baseRows) {
       if ((r as any).atts_concat) {
         r.attachments_meta = parseAttachmentConcat((r as any).atts_concat, 5);
       }
@@ -745,9 +745,10 @@ export async function searchMessages(opts: SearchOptions): Promise<(SearchMessag
   }
 
   // If we did not reach limit and a query exists, try attributedBody within the same scope
-  const seenIds = new Set(rows.map((r) => r.message_rowid));
-  if (rows.length < limit && safeQ) {
-    const need = limit - rows.length;
+  const seenIds = new Set(baseRows.map((r) => r.message_rowid));
+  const results: (EnrichedMessageRow & { chat_id: number })[] = [...baseRows];
+  if (results.length < limit && safeQ) {
+    const need = limit - results.length;
     const support = await getMessageColumnSupport(db);
     if (support.hasAttributedBody) {
       const richSql = `
@@ -776,10 +777,14 @@ export async function searchMessages(opts: SearchOptions): Promise<(SearchMessag
         matches.push(r as any);
         if (matches.length >= need) break;
       }
-      return [...rows, ...matches];
+      results.push(...matches);
     }
   }
-  return rows;
+  results.sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
+  if (results.length > limit) {
+    return results.slice(0, limit);
+  }
+  return results;
 }
 
 export async function contextAroundMessage(messageRowId: number, before = 10, after = 10, includeAttachmentsMeta = false): Promise<(MessageRow & { attachments?: { name: string; mime: string }[] })[]> {
