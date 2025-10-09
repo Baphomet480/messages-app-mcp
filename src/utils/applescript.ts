@@ -26,7 +26,9 @@ export type SendTarget = {
   chatName?: string;
 };
 
-const SEND_PAYLOAD_SCRIPT = `
+const SEND_PAYLOAD_SCRIPT = `use framework "Foundation"
+use scripting additions
+
 on run argv
   if (count of argv) < 4 then error "Missing arguments"
   set payloadKind to item 1 of argv
@@ -53,6 +55,12 @@ on run argv
         set theTarget to my locateChat(targetValue)
       else
         set theTarget to my locateRecipient(targetValue)
+        set fallbackBuddy to my locateRecipientBuddy(targetValue)
+        if fallbackBuddy is not missing value then
+          try
+            if class of fallbackBuddy is buddy then set theTarget to fallbackBuddy
+          end try
+        end if
       end if
 
       if theTarget is missing value then
@@ -76,7 +84,10 @@ on run argv
         if payloadKind is "text_path" then
           set messageText to my readTextFile(payloadValue)
         end if
-        send messageText to theTarget
+        try
+          set messageText to messageText as Unicode text
+        end try
+        send (messageText as Unicode text) to theTarget
       else
         error "Unsupported payload kind"
       end if
@@ -85,20 +96,12 @@ on run argv
 end run
 
 on readTextFile(posixPath)
-  set theFile to POSIX file posixPath
   try
-    set handleRef to open for access theFile without write permission
-    try
-      set theText to read handleRef as «class utf8»
-    on error
-      set theText to read handleRef as Unicode text
-    end try
-    close access handleRef
-    return theText
+    set fileURL to current application's NSURL's fileURLWithPath:posixPath
+    set {theString, readError} to current application's NSString's stringWithContentsOfURL:fileURL encoding:(current application's NSUTF8StringEncoding) |error|:(reference)
+    if theString is missing value then error (readError's localizedDescription() as string)
+    return theString as Unicode text
   on error errMsg number errNum
-    try
-      close access theFile
-    end try
     error "Failed to read temporary text payload: " & errMsg
   end try
 end readTextFile
@@ -196,19 +199,6 @@ on locateRecipient(theRecipient)
       end repeat
     end if
 
-    repeat with svc in candidates
-      try
-        set existingChats to (every chat whose service is svc)
-        repeat with c in existingChats
-          set parts to {}
-          try
-            set parts to participants of c
-          end try
-          if parts contains theRecipient then return c
-        end repeat
-      end try
-    end repeat
-
     repeat with ac in acctCandidates
       try
         set theParticipant to participant id theRecipient of ac
@@ -232,6 +222,19 @@ on locateRecipient(theRecipient)
 
     repeat with svc in candidates
       try
+        set existingChats to (every chat whose service is svc)
+        repeat with c in existingChats
+          set parts to {}
+          try
+            set parts to participants of c
+          end try
+          if parts contains theRecipient then return c
+        end repeat
+      end try
+    end repeat
+
+    repeat with svc in candidates
+      try
         set theChat to make new text chat with properties {service:svc, participants:{theRecipient}}
         delay 0.2
         return theChat
@@ -241,6 +244,101 @@ on locateRecipient(theRecipient)
 
   return missing value
 end locateRecipient
+
+on locateRecipientBuddy(theRecipient)
+  if theRecipient is missing value or theRecipient is "" then return missing value
+
+  set isEmail to false
+  set looksPhone to false
+  try
+    if theRecipient contains "@" then set isEmail to true
+  end try
+  if isEmail is false then
+    try
+      set firstChar to (characters 1 thru 1 of theRecipient) as string
+      if firstChar is "+" then set looksPhone to true
+    end try
+  end if
+
+  tell application "Messages"
+    set imService to missing value
+    set smsService to missing value
+    set imAccounts to {}
+    set smsAccounts to {}
+    try
+      set imService to first service whose service type is iMessage
+    end try
+    try
+      set smsService to first service whose service type is SMS
+    end try
+    try
+      set imAccounts to every account whose service type is iMessage
+    end try
+    try
+      set smsAccounts to every account whose service type is SMS
+    end try
+
+    if imService is missing value and smsService is missing value then
+      return missing value
+    end if
+
+    set candidates to {}
+    if isEmail then
+      if imService is missing value then
+        return missing value
+      end if
+      set end of candidates to imService
+    else if looksPhone then
+      if imService is not missing value then set end of candidates to imService
+      if smsService is not missing value then set end of candidates to smsService
+    else
+      if imService is not missing value then set end of candidates to imService
+      if smsService is not missing value then set end of candidates to smsService
+    end if
+
+    set acctCandidates to {}
+    if isEmail then
+      repeat with ac in imAccounts
+        set end of acctCandidates to ac
+      end repeat
+    else if looksPhone then
+      repeat with ac in imAccounts
+        set end of acctCandidates to ac
+      end repeat
+      repeat with ac in smsAccounts
+        set end of acctCandidates to ac
+      end repeat
+    else
+      repeat with ac in imAccounts
+        set end of acctCandidates to ac
+      end repeat
+      repeat with ac in smsAccounts
+        set end of acctCandidates to ac
+      end repeat
+    end if
+
+    repeat with ac in acctCandidates
+      try
+        set participantRef to participant id theRecipient of ac
+        return participantRef
+      end try
+    end repeat
+
+    repeat with svc in candidates
+      try
+        set buddyRef to buddy theRecipient of svc
+        return buddyRef
+      on error
+        try
+          set buddyRef2 to buddy id theRecipient of svc
+          return buddyRef2
+        end try
+      end try
+    end repeat
+  end tell
+
+  return missing value
+end locateRecipientBuddy
 `;
 
 function resolveSendTarget(target: string | SendTarget): { mode: TargetMode; value: string } {
