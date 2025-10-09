@@ -27,6 +27,7 @@ import type { MessageLike, SendTargetDescriptor, SendResultPayload } from "./uti
 import { getVersionInfo, getVersionInfoSync } from "./utils/version.js";
 import { runDoctor } from "./utils/doctor.js";
 import { getLogger } from "./utils/logger.js";
+import { normalizeMessageText, truncateForLog } from "./utils/text-utils.js";
 import type { EnrichedMessageRow, AttachmentInfo } from "./utils/sqlite.js";
 
 const logger = getLogger();
@@ -76,14 +77,6 @@ function cleanOsaError(err: unknown): string {
   m = m.replace(/\s*\([\-\d]+\)\s*$/i, "");
   m = m.replace(/^"|"$/g, "");
   return m.trim();
-}
-
-function truncateForLog(text: string | null | undefined, max = 120): string | null {
-  if (!text) return null;
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return null;
-  if (normalized.length <= max) return normalized;
-  return `${normalized.slice(0, max - 1)}…`;
 }
 
 // Default: do NOT mask. Opt-in masking with MESSAGES_MCP_MASK_RECIPIENTS=true
@@ -190,19 +183,6 @@ async function collectRecentMessages(
 }
 
 const OBJECT_REPLACEMENT_ONLY = /^[\uFFFC\uFFFD]+$/;
-
-function sanitizeText(s: string | null | undefined): string | null {
-  if (s == null) return null;
-  try {
-    // Normalize and strip non-printables except common whitespace
-    const n = s.normalize('NFC');
-    const cleaned = n.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
-      .replace(/[\u2028\u2029]/g, '\n');
-    return cleaned;
-  } catch {
-    return s;
-  }
-}
 
 function isReadOnly(): boolean {
   const v = process.env.MESSAGES_MCP_READONLY;
@@ -327,14 +307,14 @@ function normalizeMessage(row: EnrichedMessageRow & { chat_id?: number }): Norma
   }));
   const hasAttachments = (row.has_attachments ?? 0) > 0 || (hints?.length ?? 0) > 0;
   let textSource: "text" | "attributedBody" | "none" = "none";
-  let text = sanitizeText(row.text);
+  let text = normalizeMessageText(row.text);
   if (text && text.trim().length > 0 && OBJECT_REPLACEMENT_ONLY.test(text.trim())) {
     text = null;
   }
   if (text && text.trim().length > 0) {
     textSource = "text";
   } else if (row.decoded_text && row.decoded_text.trim().length > 0) {
-    text = sanitizeText(row.decoded_text);
+    text = normalizeMessageText(row.decoded_text);
     if (text && text.trim().length > 0 && OBJECT_REPLACEMENT_ONLY.test(text.trim())) {
       text = null;
     }
