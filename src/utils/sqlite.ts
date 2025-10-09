@@ -168,14 +168,46 @@ async function decodeAttributedBodyHexLegacy(hex: string): Promise<string | null
     };
     visit(data);
     const sorted = strings.sort((a, b) => b.length - a.length);
-    return sorted[0] || null;
+    return sorted[0] || extractLongestPrintable(buf);
   } catch {
-    return null;
+    return extractLongestPrintable(Buffer.from(hex, "hex"));
   }
 }
 
+function extractLongestPrintable(buffer: Buffer): string | null {
+  let best = "";
+  let current = "";
+  const flush = () => {
+    const candidate = current.trim();
+    if (candidate.length > best.length) best = candidate;
+    current = "";
+  };
+  for (let i = 0; i < buffer.length; i += 1) {
+    const byte = buffer[i];
+    if ((byte >= 0x20 && byte <= 0x7E) || byte === 0x0A || byte === 0x0D || byte === 0x09) {
+      const ch = byte === 0x0A || byte === 0x0D || byte === 0x09 ? " " : String.fromCharCode(byte);
+      current += ch;
+    } else {
+      flush();
+    }
+  }
+  flush();
+  if (!best) return null;
+  // some attributed payloads prefix strings with formatting markers like "+=" – trim common junk.
+  return best.replace(/^[+=\s]+/, "").trim() || null;
+}
+
+function normalizeParsedText(input: string | null | undefined): string | null {
+  if (typeof input !== "string") return null;
+  const collapsed = input.replace(/\s+/g, " ").trim();
+  if (!collapsed) return null;
+  const withoutReplacement = collapsed.replace(/[\uFFFC\uFFFD]/g, "").trim();
+  if (!withoutReplacement) return null;
+  return collapsed;
+}
+
 function convertParsedMessage(parsed: ParsedMessage): ParsedAttributedBody {
-  const text = parsed.text?.trim().length ? parsed.text : null;
+  const text = normalizeParsedText(parsed.text);
   const textSource: ParsedAttributedBody["textSource"] = text ? "parser" : "none";
   const attachments: AttributedAttachmentHint[] = (parsed.attributes?.attachments || []).map((att: AttachmentAttribute) => ({
     guid: att.guid,
@@ -733,10 +765,10 @@ export async function searchMessages(opts: SearchOptions): Promise<(SearchMessag
     ORDER BY m.date DESC
     LIMIT ${limit} OFFSET ${offset};`;
 
-  const rows = (await runSqliteJSON(db, sql)) as (EnrichedMessageRow & { chat_id: number; atts_concat?: string | null })[];
-  await hydrateAttributedBodies(rows);
+  const baseRows = (await runSqliteJSON(db, sql)) as (EnrichedMessageRow & { chat_id: number; atts_concat?: string | null })[];
+  await hydrateAttributedBodies(baseRows);
   if (opts.includeAttachmentsMeta) {
-    for (const r of rows) {
+    for (const r of baseRows) {
       if ((r as any).atts_concat) {
         r.attachments_meta = parseAttachmentConcat((r as any).atts_concat, 5);
       }
@@ -745,9 +777,10 @@ export async function searchMessages(opts: SearchOptions): Promise<(SearchMessag
   }
 
   // If we did not reach limit and a query exists, try attributedBody within the same scope
-  const seenIds = new Set(rows.map((r) => r.message_rowid));
-  if (rows.length < limit && safeQ) {
-    const need = limit - rows.length;
+  const seenIds = new Set(baseRows.map((r) => r.message_rowid));
+  const results: (EnrichedMessageRow & { chat_id: number })[] = [...baseRows];
+  if (results.length < limit && safeQ) {
+    const need = limit - results.length;
     const support = await getMessageColumnSupport(db);
     if (support.hasAttributedBody) {
       const richSql = `
@@ -776,10 +809,14 @@ export async function searchMessages(opts: SearchOptions): Promise<(SearchMessag
         matches.push(r as any);
         if (matches.length >= need) break;
       }
-      return [...rows, ...matches];
+      results.push(...matches);
     }
   }
-  return rows;
+  results.sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
+  if (results.length > limit) {
+    return results.slice(0, limit);
+  }
+  return results;
 }
 
 export async function contextAroundMessage(messageRowId: number, before = 10, after = 10, includeAttachmentsMeta = false): Promise<(MessageRow & { attachments?: { name: string; mime: string }[] })[]> {
