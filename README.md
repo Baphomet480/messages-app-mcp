@@ -82,9 +82,10 @@ The binary published on npm (installable via pnpm) is identical to `dist/index.j
 | `list_chats` | Lists recent chats with participants, unread counts, and last-activity timestamps (Apple epoch converted to UNIX/ISO). | Supports filters: `limit`, `participant`, `updated_after_unix_ms`, `unread_only`. |
 | `get_messages` | Retrieves normalized message rows by `chat_id` or `participant`, optionally with contextual windows and attachment metadata. | Structured payload includes ISO timestamps, message types, and optional context bundle. |
 | `recent_messages_by_participant` | Returns the most recent normalized messages for a participant handle (phone or email). | Use when you want the latest conversation history without providing a text query. |
+| `history_by_days` | Fetches recent history for a chat or participant over a fixed number of days without requiring a text query. | Supply `chat_id` or `participant`, plus `days_back` (default 30) and `limit` (default 100). |
 | `send_text` | Sends text to a recipient/chat and returns a single-envelope JSON result with `ok`, `summary`, target, recent messages, and the original payload/segment metadata. | Honors `MESSAGES_MCP_READONLY`; always returns the same envelope shape with `ok: false` on failure. |
 | `send_attachment` | Sends a file (with optional caption) using the same targeting options as `send_text`. | Same envelope as `send_text`, with an optional `attachment` field. |
-| `search_messages` / `search_messages_safe` | Full-text search with scoping options and convenience defaults to avoid whole DB scans. | Safe variant enforces day-based limits automatically. |
+| `search_messages` / `search_messages_safe` | Full-text search plus scoped recency filters. | Safe variant enforces `days_back ≤ 365`; switch to `search_messages` for longer ranges or explicit Unix timestamps. |
 | `context_around_message` | Fetches a window of normalized messages around an anchor `message_rowid`. | Useful for tools that need surrounding context without large history fetches. |
 | `summarize_window` | Summarize a window of messages around an anchor rowid with participant counts and trimmed lines. | Helpful for quick recap responses without fetching full history. |
 | `get_attachments` | Resolves attachment metadata (names, MIME types, byte sizes, resolved paths) with strict per-message caps. | Always read-only. |
@@ -92,11 +93,12 @@ The binary published on npm (installable via pnpm) is identical to `dist/index.j
 | `applescript_handler_template` | Generates a starter AppleScript for message events (received/sent/transfer). | Save under `~/Library/Application Scripts/com.apple.iChat/`. |
 | `search` / `fetch` | Connector-friendly tools for ChatGPT Pro / Deep Research (Streamable HTTP mode). | Emit JSON strings matching MCP connector expectations. |
 
-### Search scope & participants
+### Recency & search scope
 
-- **`search`** (connector) accepts `query`, optional `chat_guid`, optional `participant` (phone/email handle *or* chat display name), `days_back` (capped at 365), and `limit`. Use it for lightweight snippets.
-- **`search_messages`** exposes the full normalized rows and lets you mix `query`, `chat_id`, `participant`, and explicit Unix ranges (`from_unix_ms`/`to_unix_ms`). Pass `from_unix_ms: 0` to scan all history or scope to a participant handle/display name to chase a single contact.
-- **`search_messages_safe`** enforces that you provide at least one of `chat_id`, `participant`, or `days_back`, and mirrors the same structured output.
+- **`history_by_days`** is the quickest way to say “give me the last *N* days” for a merged conversation: supply `chat_id` or `participant`, optionally enable `include_attachments_meta`, and it returns normalized rows sorted oldest→newest.
+- **`search_messages`** exposes the same normalized rows but adds optional full-text search plus explicit Unix range filters (`from_unix_ms`/`to_unix_ms`). Use this when you need more than the default history window or want to combine keyword filters.
+- **`search_messages_safe`** enforces a scope guard (`chat_id`, `participant`, or `days_back ≤ 365`) to keep queries predictable for agents. Stick with this variant when you do not need multi-year lookbacks.
+- **`search`** (connector) still exists for Streamable HTTP / ChatGPT connectors; it returns lightweight documents (`id`, `title`, `snippet`) rather than the full normalized message rows.
 
 Example (`search_messages` call over MCP stdio):
 
@@ -167,9 +169,33 @@ Logs note every `send_text` / `send_attachment` attempt (masked recipients), eac
 - `MESSAGES_MCP_SEGMENT_WARNING=10` – emit `payload_warning` when a text spans more than this many segments (set to `0` to disable).
 - `MESSAGES_MCP_MASK_RECIPIENTS=true` – mask phone numbers/emails in responses.
 - `MESSAGES_MCP_HTTP_*` – configure optional Streamable HTTP transport (`PORT`, `HOST`, `ENABLE_SSE`, `CORS_ORIGINS`, etc.).
+- `MESSAGES_MCP_HTTP_OIDC_*` – enable OAuth/OIDC protection for the HTTP transport. See [OAuth guard](#oauth-guard) for the full matrix.
 - `MESSAGES_MCP_CONNECTOR_DAYS_BACK=365`, `MESSAGES_MCP_CONNECTOR_LIMIT=20` – adjust defaults for the connector-facing `search`/`fetch` tools.
 
 Grant Full Disk Access before running the server so SQLite reads succeed. Without it, `doctor` will warn and send tools will fail silently in Messages.app.
+
+### OAuth guard
+
+Set `MESSAGES_MCP_HTTP_OIDC_ENABLED=true` to wrap the HTTP transport with `express-openid-connect`. This adds login, callback, and logout routes plus a lightweight session endpoint (default: `/auth/session`). Requests to `/mcp` (and `/sse`/`/messages` if the SSE fallback is enabled) must complete an OAuth flow before traffic reaches the MCP transports.
+
+Required environment variables:
+
+- `MESSAGES_MCP_HTTP_OIDC_ISSUER_BASE_URL` – OIDC issuer (e.g. `https://YOUR_DOMAIN.auth0.com`, `https://accounts.google.com`).
+- `MESSAGES_MCP_HTTP_OIDC_BASE_URL` – the externally reachable base URL for this server (e.g. `https://mcp.example.com`). Use the reverse proxy origin.
+- `MESSAGES_MCP_HTTP_OIDC_CLIENT_ID` – OIDC client/application ID.
+- `MESSAGES_MCP_HTTP_OIDC_SESSION_SECRET` – 32+ character secret for cookie encryption.
+
+Optional knobs:
+
+- `MESSAGES_MCP_HTTP_OIDC_CLIENT_SECRET` – supply when your provider requires a confidential client.
+- `MESSAGES_MCP_HTTP_OIDC_SCOPE` (default `openid profile email`) and `MESSAGES_MCP_HTTP_OIDC_AUDIENCE` – request extra identity/API claims.
+- `MESSAGES_MCP_HTTP_OIDC_AUTH_REQUIRED` – set `true` to make every route (including `/health`) require authentication; by default only MCP endpoints are guarded.
+- `MESSAGES_MCP_HTTP_OIDC_PROTECT_HEALTH` – require auth for `/health` without forcing `AUTH_REQUIRED=true`.
+- `MESSAGES_MCP_HTTP_OIDC_TRUST_PROXY` – numeric hop count passed to `app.set("trust proxy", value)` (default `1`) for TLS-terminating proxies.
+- `MESSAGES_MCP_HTTP_OIDC_SESSION_PATH` – override the session introspection route (set to empty string to disable).
+- `MESSAGES_MCP_HTTP_OIDC_IDP_LOGOUT` – set `true` to propagate logout to the identity provider when calling `/logout`.
+
+Behind an HTTPS reverse proxy, expose `/mcp` (and `/login`, `/callback`, `/logout`) publicly, force TLS at the proxy, and ensure cookies are preserved end-to-end. The guard skips CORS pre-flight OPTIONS requests, so browsers can still negotiate HTTP transports.
 
 ## Versioning & Support
 
@@ -182,6 +208,8 @@ Grant Full Disk Access before running the server so SQLite reads succeed. Withou
 - `pnpm run dev` starts the stdio server via ts-node.
 - `pnpm run build` compiles TypeScript to `dist/`; run `pnpm start` to execute the compiled build.
 - An MCP Inspector session can be launched with `pnpm run inspector`.
+- `node scripts/check-tools.mjs` performs the automated metadata audit used in CI to keep tool titles and field descriptions aligned with MCP best practices.
+- `node scripts/test-search.mjs --participant '+15551234567' --days-back 30` exercises the recency/search flow exactly as an MCP client would.
 - Scripts are documented in `package.json`; use `pnpm run send` or `pnpm run doctor` for quick manual checks.
 
 ## Testing
