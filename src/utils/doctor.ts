@@ -10,6 +10,7 @@ export type DoctorReport = {
   accounts: string[];
   iMessage_available: boolean;
   sms_available: boolean;
+  rcs_available: boolean;
   sqlite_access: boolean;
   db_path: string;
   notes: string[];
@@ -57,6 +58,7 @@ export async function runDoctor(): Promise<DoctorReport & { summary: string }> {
 
   const iMessage_available = services.includes("iMessage") || accounts.includes("iMessage");
   const sms_available = services.includes("SMS") || accounts.includes("SMS");
+  const rcs_available = services.includes("RCS") || accounts.includes("RCS");
   const servicesQueried = services.length > 0 || accounts.length > 0;
   if (!servicesQueried) {
     notes.push("Messages services could not be enumerated via AppleScript; sending may still work (as observed). This is a known quirk on some macOS versions.");
@@ -99,6 +101,7 @@ export async function runDoctor(): Promise<DoctorReport & { summary: string }> {
     `accounts: ${accounts.join(", ") || "(none)"}`,
     `iMessage: ${servicesQueried ? (iMessage_available ? "available" : "not available") : "unknown"}`,
     `SMS: ${servicesQueried ? (sms_available ? "available" : "not available") : "unknown"}`,
+    `RCS: ${servicesQueried ? (rcs_available ? "available" : "not available") : "unknown"}`,
     `sqlite access: ${sqlite_access ? "ok" : "blocked"} (${db_path})`
   ].join("\n");
 
@@ -109,6 +112,7 @@ export async function runDoctor(): Promise<DoctorReport & { summary: string }> {
     accounts,
     iMessage_available,
     sms_available,
+    rcs_available,
     sqlite_access,
     db_path,
     notes,

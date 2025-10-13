@@ -1,15 +1,32 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import express, { type Request, type Response } from "express";
+import express, { type Request, type Response, type RequestHandler } from "express";
 import cors from "cors";
+import type { ConfigParams } from "express-openid-connect";
+import * as expressOpenIdConnect from "express-openid-connect";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { sendMessageAppleScript, sendAttachmentAppleScript, MESSAGES_FDA_HINT, type SendTarget } from "./utils/applescript.js";
+import {
+  sendMessageAppleScript,
+  sendAttachmentAppleScript,
+  MESSAGES_FDA_HINT,
+  type SendTarget,
+  listMessagesAccounts,
+  listMessagesParticipants,
+  listMessagesFileTransfers,
+  acceptMessagesFileTransfer,
+  loginMessagesAccounts,
+  logoutMessagesAccounts,
+  type MessagesAccountInfo,
+  type MessagesParticipantInfo,
+  type MessagesFileTransferInfo,
+  type MessagesFileTransferAcceptance,
+} from "./utils/applescript.js";
 import {
   listChats,
   getMessagesByChatId,
@@ -31,6 +48,7 @@ import { normalizeMessageText, truncateForLog, estimateSegmentInfo } from "./uti
 import type { SegmentInfo } from "./utils/text-utils.js";
 import type { EnrichedMessageRow, AttachmentInfo } from "./utils/sqlite.js";
 
+const { auth, requiresAuth } = expressOpenIdConnect;
 const logger = getLogger();
 
 process.on("unhandledRejection", (reason) => {
@@ -241,9 +259,80 @@ function parseCsv(raw: string | undefined): string[] {
     .filter((part) => part.length > 0);
 }
 
+type OAuthRuntimeConfig = {
+  authOptions: ConfigParams;
+  trustProxy: number;
+  protectHealth: boolean;
+  sessionInfoPath: string | null;
+};
+
+function loadOAuthRuntimeConfig(): OAuthRuntimeConfig | null {
+  const enabled = parseEnvBool("MESSAGES_MCP_HTTP_OIDC_ENABLED", false);
+  if (!enabled) {
+    return null;
+  }
+
+  const issuerBaseURL = process.env.MESSAGES_MCP_HTTP_OIDC_ISSUER_BASE_URL?.trim();
+  const baseURL = process.env.MESSAGES_MCP_HTTP_OIDC_BASE_URL?.trim();
+  const clientID = process.env.MESSAGES_MCP_HTTP_OIDC_CLIENT_ID?.trim();
+  const clientSecret = process.env.MESSAGES_MCP_HTTP_OIDC_CLIENT_SECRET?.trim();
+  const sessionSecret = process.env.MESSAGES_MCP_HTTP_OIDC_SESSION_SECRET?.trim();
+  const scope = process.env.MESSAGES_MCP_HTTP_OIDC_SCOPE?.trim() || "openid profile email";
+  const audience = process.env.MESSAGES_MCP_HTTP_OIDC_AUDIENCE?.trim();
+  const authRequired = parseEnvBool("MESSAGES_MCP_HTTP_OIDC_AUTH_REQUIRED", false);
+  const idpLogout = parseEnvBool("MESSAGES_MCP_HTTP_OIDC_IDP_LOGOUT", false);
+  const trustProxy = parseEnvInt("MESSAGES_MCP_HTTP_OIDC_TRUST_PROXY", 1, 0, 100);
+  const protectHealth = parseEnvBool("MESSAGES_MCP_HTTP_OIDC_PROTECT_HEALTH", false);
+  const rawSessionInfoPath = process.env.MESSAGES_MCP_HTTP_OIDC_SESSION_PATH;
+  const sessionInfoPath = rawSessionInfoPath?.trim()
+    ? rawSessionInfoPath.trim()
+    : "/auth/session";
+
+  const missing: string[] = [];
+  if (!issuerBaseURL) missing.push("MESSAGES_MCP_HTTP_OIDC_ISSUER_BASE_URL");
+  if (!baseURL) missing.push("MESSAGES_MCP_HTTP_OIDC_BASE_URL");
+  if (!clientID) missing.push("MESSAGES_MCP_HTTP_OIDC_CLIENT_ID");
+  if (!sessionSecret) missing.push("MESSAGES_MCP_HTTP_OIDC_SESSION_SECRET");
+
+  if (missing.length) {
+    throw new Error(
+      `OAuth is enabled but required environment variables are missing: ${missing.join(", ")}`,
+    );
+  }
+
+  const normalizedBaseURL = baseURL!.endsWith("/") ? baseURL!.slice(0, -1) : baseURL!;
+
+  const authorizationParams: Record<string, string> = {
+    response_type: "code",
+    scope,
+  };
+  if (audience) {
+    authorizationParams.audience = audience;
+  }
+
+  const authOptions: ConfigParams = {
+    authRequired,
+    issuerBaseURL: issuerBaseURL!,
+    baseURL: normalizedBaseURL,
+    clientID: clientID!,
+    clientSecret: clientSecret || undefined,
+    secret: sessionSecret!,
+    idpLogout,
+    authorizationParams,
+  };
+
+  return {
+    authOptions,
+    trustProxy,
+    protectHealth,
+    sessionInfoPath: sessionInfoPath && sessionInfoPath.length ? sessionInfoPath : null,
+  };
+}
+
 const CONNECTOR_DEFAULT_DAYS_BACK = parseEnvInt("MESSAGES_MCP_CONNECTOR_DAYS_BACK", 30, 1, 365);
 const CONNECTOR_DEFAULT_LIMIT = parseEnvInt("MESSAGES_MCP_CONNECTOR_SEARCH_LIMIT", 20, 1, 50);
 const CONNECTOR_BASE_URL = (process.env.MESSAGES_MCP_CONNECTOR_BASE_URL || "").trim().replace(/\/+$/, "");
+const HISTORY_BY_DAYS_MAX = parseEnvInt("MESSAGES_MCP_HISTORY_MAX_DAYS", 730, 1, 3650);
 
 function toIsoUtc(unixMs: number | null): string | null {
   if (unixMs == null) return null;
@@ -641,8 +730,8 @@ function createConfiguredServer(): McpServer {
     server.registerTool(
       "send_text",
       {
-        title: "Send Text",
-        description: "Send a text/iMessage via Messages.app to a phone number or email.",
+        title: "Send Message",
+        description: "Send an SMS, RCS, or iMessage via Messages.app to a phone number, chat GUID, or named chat.",
         inputSchema: sendTextInputSchema,
         outputSchema: sendStandardOutputSchema.shape,
       },
@@ -668,8 +757,8 @@ function createConfiguredServer(): McpServer {
     server.registerTool(
       "send_text",
       {
-        title: "Send Text",
-        description: "Send a text/iMessage via Messages.app to a phone number or email.",
+        title: "Send Message",
+        description: "Send an SMS, RCS, or iMessage via Messages.app to a phone number, chat GUID, or named chat.",
         inputSchema: sendTextInputSchema,
         outputSchema: sendStandardOutputSchema.shape,
       },
@@ -748,7 +837,7 @@ function createConfiguredServer(): McpServer {
       "send_attachment",
       {
         title: "Send Attachment",
-        description: "Send an attachment via Messages.app to a recipient or existing chat.",
+        description: "Send an attachment over SMS, RCS, or iMessage via Messages.app to a recipient or existing chat.",
         inputSchema: sendAttachmentInputSchema,
         outputSchema: sendStandardOutputSchema.shape,
       },
@@ -866,6 +955,7 @@ function createConfiguredServer(): McpServer {
         accounts: z.array(z.string()),
         iMessage_available: z.boolean(),
         sms_available: z.boolean(),
+        rcs_available: z.boolean(),
         sqlite_access: z.boolean(),
         db_path: z.string(),
         notes: z.array(z.string()),
@@ -928,16 +1018,112 @@ function createConfiguredServer(): McpServer {
     }
   );
 
+  server.registerTool(
+    "messaging_capabilities",
+    {
+      title: "Messaging Capabilities",
+      description: "Summarize delivery channels and send tools exposed by messages-app-mcp.",
+      outputSchema: {
+        summary: z.string(),
+        channels: z.array(
+          z.object({
+            name: z.string(),
+            delivery: z.string(),
+            notes: z.string(),
+          })
+        ),
+        tools: z.array(
+          z.object({
+            tool: z.string(),
+            purpose: z.string(),
+            inputs: z.array(z.string()),
+          })
+        ),
+        requirements: z.array(z.string()),
+      },
+    },
+    async () => {
+      const payload = {
+        summary: "messages-app-mcp can originate SMS, RCS, and iMessage conversations and fetch recent context via Messages.app.",
+        channels: [
+          {
+            name: "SMS",
+            delivery: "Green bubble texts routed through the paired iPhone or carrier.",
+            notes: "Requires Text Message Forwarding or cellular Mac capability; segment counts use GSM-7 when possible.",
+          },
+          {
+            name: "RCS",
+            delivery: "Rich Communication Services via the Apple/Google hub available on Sequoia and newer.",
+            notes: "Availability depends on signed-in RCS account; diagnostics surface support through the doctor tool.",
+          },
+          {
+            name: "iMessage",
+            delivery: "Apple’s blue bubble service over data with read receipts and attachments.",
+            notes: "Requires a signed-in Apple ID within Messages.app on this host.",
+          },
+        ],
+        tools: [
+          {
+            tool: "send_text",
+            purpose: "Send Message — originate or continue a thread with text only.",
+            inputs: ["recipient", "chat_guid", "chat_name", "text"],
+          },
+          {
+            tool: "send_attachment",
+            purpose: "Send Attachment — deliver a file with optional caption.",
+            inputs: ["recipient", "chat_guid", "chat_name", "file_path", "caption"],
+          },
+          {
+            tool: "recent_messages_by_participant",
+            purpose: "Fetch a quick history for a single handle to confirm context before sending.",
+            inputs: ["participant", "limit"],
+          },
+          {
+            tool: "list_chats",
+            purpose: "Enumerate active threads to select the correct conversation prior to sending.",
+            inputs: ["limit", "participant", "updated_after_unix_ms", "unread_only"],
+          },
+        ],
+        requirements: [
+          "macOS with Messages.app signed into the desired services",
+          "Terminal process granted Full Disk Access to read chat.db",
+          "Outgoing sends disabled when MESSAGES_MCP_READONLY=true",
+        ],
+      } as const;
+      return {
+        content: textContent(JSON.stringify(payload, null, 2)),
+        structuredContent: payload,
+      };
+    }
+  );
+
   // list_chats tool with structured output
   server.registerTool(
     "list_chats",
     {
+      title: "List Chats",
       description: "List recent chats from Messages.db with participants and last-activity.",
       inputSchema: {
-        limit: z.number().int().min(1).max(500).default(50),
-        participant: z.string().optional(),
-        updated_after_unix_ms: z.number().int().optional(),
-        unread_only: z.boolean().optional(),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .default(50)
+          .describe("Maximum chats to return (defaults to 50)."),
+        participant: z
+          .string()
+          .optional()
+          .describe("Optional participant handle fragment to scope chats."),
+        updated_after_unix_ms: z
+          .number()
+          .int()
+          .optional()
+          .describe("Only include chats updated after this Unix timestamp in milliseconds."),
+        unread_only: z
+          .boolean()
+          .optional()
+          .describe("When true, restrict results to chats with unread messages."),
       },
       outputSchema: {
         chats: z.array(z.object({
@@ -988,15 +1174,48 @@ function createConfiguredServer(): McpServer {
   server.registerTool(
     "get_messages",
     {
+      title: "Get Messages",
       description: "Get recent messages by chat_id or participant handle (phone/email).",
       inputSchema: {
-        chat_id: z.number().int().optional(),
-        participant: z.string().optional(),
-        limit: z.number().int().min(1).max(500).default(50),
-        context_anchor_rowid: z.number().int().optional(),
-        context_before: z.number().int().min(0).max(200).default(10),
-        context_after: z.number().int().min(0).max(200).default(10),
-        context_include_attachments_meta: z.boolean().optional(),
+        chat_id: z
+          .number()
+          .int()
+          .optional()
+          .describe("Numeric chat identifier from list_chats."),
+        participant: z
+          .string()
+          .optional()
+          .describe("Phone number or email handle to scope the query."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .default(50)
+          .describe("Maximum number of messages to return (defaults to 50)."),
+        context_anchor_rowid: z
+          .number()
+          .int()
+          .optional()
+          .describe("Anchor message_rowid for contextual expansion."),
+        context_before: z
+          .number()
+          .int()
+          .min(0)
+          .max(200)
+          .default(10)
+          .describe("Messages to include before the anchor (0-200)."),
+        context_after: z
+          .number()
+          .int()
+          .min(0)
+          .max(200)
+          .default(10)
+          .describe("Messages to include after the anchor (0-200)."),
+        context_include_attachments_meta: z
+          .boolean()
+          .optional()
+          .describe("Include attachment metadata in contextual results."),
       },
       outputSchema: {
         messages: z.array(normalizedMessageSchema),
@@ -1060,11 +1279,24 @@ function createConfiguredServer(): McpServer {
   server.registerTool(
     "recent_messages_by_participant",
     {
+      title: "Recent Messages By Participant",
       description: "Return the most recent normalized messages for a participant handle (phone/email).",
       inputSchema: {
-        participant: z.string().min(1),
-        limit: z.number().int().min(1).max(500).default(50),
-        include_attachments_meta: z.boolean().optional(),
+        participant: z
+          .string()
+          .min(1)
+          .describe("Handle (phone or email) whose history should be returned."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .default(50)
+          .describe("Maximum messages to return (defaults to 50)."),
+        include_attachments_meta: z
+          .boolean()
+          .optional()
+          .describe("Include attachment metadata in the response."),
       },
       outputSchema: {
         messages: z.array(normalizedMessageSchema)
@@ -1099,22 +1331,293 @@ function createConfiguredServer(): McpServer {
     }
   );
 
+  server.registerTool(
+    "list_accounts",
+    {
+      title: "List Accounts",
+      description: "List Messages accounts with service type, connection status, and enablement state.",
+      outputSchema: {
+        accounts: z.array(
+          z.object({
+            id: z.string(),
+            service_type: z.string(),
+            description: z.string(),
+            connection_status: z.string(),
+            enabled: z.boolean(),
+          })
+        ),
+      },
+    },
+    async () => {
+      try {
+        const accounts = await listMessagesAccounts();
+        logger.info("list_accounts", { account_count: accounts.length, services: accounts.map((a) => a.service_type) });
+        const payload = { accounts } satisfies { accounts: MessagesAccountInfo[] };
+        return {
+          content: textContent(JSON.stringify(payload, null, 2)),
+          structuredContent: payload,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("list_accounts_failed", { error: message });
+        return { content: textContent(`Failed to list Messages accounts. Error: ${message}`), isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    "list_participants",
+    {
+      title: "List Participants",
+      description: "List known participants from Messages with optional substring filtering.",
+      inputSchema: {
+        filter: z.string().optional().describe("Case-insensitive substring matched against handle and contact names."),
+        limit: z.number().int().min(1).max(1000).optional().describe("Maximum participants to return (defaults to 250)."),
+      },
+      outputSchema: {
+        participants: z.array(
+          z.object({
+            id: z.string(),
+            handle: z.string(),
+            name: z.string(),
+            first_name: z.string(),
+            last_name: z.string(),
+            full_name: z.string(),
+            account_service_type: z.string(),
+          })
+        ),
+      },
+    },
+    async ({ filter, limit }) => {
+      try {
+        const participants = await listMessagesParticipants(filter);
+        const trimmed = typeof limit === "number" && limit > 0 ? participants.slice(0, limit) : participants.slice(0, 250);
+        logger.info("list_participants", {
+          filter: filter ?? null,
+          limit: limit ?? null,
+          total_count: participants.length,
+          returned_count: trimmed.length,
+        });
+        const payload = { participants: trimmed } satisfies { participants: MessagesParticipantInfo[] };
+        return {
+          content: textContent(JSON.stringify(payload, null, 2)),
+          structuredContent: payload,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("list_participants_failed", { error: message, filter: filter ?? null });
+        return { content: textContent(`Failed to list Messages participants. Error: ${message}`), isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    "login_accounts",
+    {
+      title: "Login Accounts",
+      description: "Trigger Messages to log in all configured accounts.",
+      outputSchema: {
+        ok: z.boolean(),
+        message: z.string(),
+      },
+    },
+    async () => {
+      try {
+        await loginMessagesAccounts();
+        const message = "Login command sent to Messages.";
+        logger.info("login_accounts_success");
+        return { content: textContent(message), structuredContent: { ok: true, message } };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("login_accounts_failed", { error: message });
+        return { content: textContent(`Failed to log in Messages accounts. Error: ${message}`), structuredContent: { ok: false, message }, isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    "logout_accounts",
+    {
+      title: "Logout Accounts",
+      description: "Trigger Messages to log out all configured accounts.",
+      outputSchema: {
+        ok: z.boolean(),
+        message: z.string(),
+      },
+    },
+    async () => {
+      try {
+        await logoutMessagesAccounts();
+        const message = "Logout command sent to Messages.";
+        logger.info("logout_accounts_success");
+        return { content: textContent(message), structuredContent: { ok: true, message } };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("logout_accounts_failed", { error: message });
+        return { content: textContent(`Failed to log out Messages accounts. Error: ${message}`), structuredContent: { ok: false, message }, isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    "list_file_transfers",
+    {
+      title: "List File Transfers",
+      description: "List file transfers that Messages is currently processing.",
+      inputSchema: {
+        include_finished: z.boolean().optional().describe("Include completed transfers (defaults to false)."),
+        limit: z.number().int().min(1).max(500).optional().describe("Maximum number of transfers to return."),
+      },
+      outputSchema: {
+        transfers: z.array(
+          z.object({
+            id: z.string(),
+            name: z.string(),
+            direction: z.string(),
+            transfer_status: z.string(),
+            file_path: z.string(),
+            file_size: z.number().nullable(),
+            file_progress: z.number().nullable(),
+            started_unix: z.number().nullable(),
+            started_iso: z.string(),
+            account_service_type: z.string(),
+            account_id: z.string(),
+            participant_handle: z.string(),
+            participant_name: z.string(),
+          })
+        ),
+      },
+    },
+    async ({ include_finished, limit }) => {
+      try {
+        const transfers = await listMessagesFileTransfers({ includeFinished: include_finished, limit: limit ?? 0 });
+        logger.info("list_file_transfers", {
+          transfer_count: transfers.length,
+          include_finished: !!include_finished,
+          limit: limit ?? null,
+          directions: Array.from(new Set(transfers.map((t) => t.direction))).filter(Boolean),
+        });
+        const payload = { transfers } satisfies { transfers: MessagesFileTransferInfo[] };
+        return {
+          content: textContent(JSON.stringify(payload, null, 2)),
+          structuredContent: payload,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("list_file_transfers_failed", { error: message, include_finished: !!include_finished, limit: limit ?? null });
+        return { content: textContent(`Failed to list Messages file transfers. Error: ${message}`), isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    "accept_file_transfer",
+    {
+      title: "Accept File Transfer",
+      description: "Accept a pending Messages file transfer by id and return updated metadata.",
+      inputSchema: {
+        id: z.string().min(1).describe("File transfer id (from list_file_transfers)."),
+      },
+      outputSchema: {
+        transfer: z.object({
+          id: z.string(),
+          name: z.string(),
+          direction: z.string(),
+          transfer_status: z.string(),
+          file_path: z.string(),
+          file_size: z.number().nullable(),
+          file_progress: z.number().nullable(),
+          started_unix: z.number().nullable(),
+          started_iso: z.string(),
+          account_service_type: z.string(),
+          account_id: z.string(),
+          participant_handle: z.string(),
+          participant_name: z.string(),
+          accepted: z.boolean(),
+          error: z.string(),
+        }),
+      },
+    },
+    async ({ id }) => {
+      try {
+        const acceptance = await acceptMessagesFileTransfer(id);
+        logger.info("accept_file_transfer", {
+          id,
+          accepted: acceptance.accepted,
+          transfer_status: acceptance.transfer_status,
+          account_service_type: acceptance.account_service_type,
+          participant_handle: maskRecipient(acceptance.participant_handle ?? ""),
+          error: acceptance.error || null,
+        });
+        const payload = { transfer: acceptance } satisfies { transfer: MessagesFileTransferAcceptance };
+        return {
+          content: textContent(JSON.stringify(payload, null, 2)),
+          structuredContent: payload,
+          isError: acceptance.accepted ? undefined : true,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("accept_file_transfer_failed", { id, error: message });
+        return { content: textContent(`Failed to accept file transfer ${id}. Error: ${message}`), isError: true };
+      }
+    }
+  );
+
   // search_messages tool
   server.registerTool(
     "search_messages",
     {
-      description: "Search messages by text with optional scoping and filters.",
+      title: "Search Messages (Scoped)",
+      description: "Search or filter conversation history by text with optional chat/participant scope and explicit time bounds.",
       inputSchema: {
-        query: z.string().min(1),
-        chat_id: z.number().int().optional(),
-        participant: z.string().optional(),
-        from_unix_ms: z.number().int().optional(),
-        to_unix_ms: z.number().int().optional(),
-        from_me: z.boolean().optional(),
-        has_attachments: z.boolean().optional(),
-        limit: z.number().int().min(1).max(500).default(50),
-        offset: z.number().int().min(0).default(0),
-        include_attachments_meta: z.boolean().optional(),
+        query: z
+          .string()
+          .min(1)
+          .describe("Search text to match within message bodies."),
+        chat_id: z
+          .number()
+          .int()
+          .optional()
+          .describe("Scope search to this chat_id."),
+        participant: z
+          .string()
+          .optional()
+          .describe("Scope search to messages involving this handle."),
+        from_unix_ms: z
+          .number()
+          .int()
+          .optional()
+          .describe("Lower bound Unix timestamp (ms) for message time."),
+        to_unix_ms: z
+          .number()
+          .int()
+          .optional()
+          .describe("Upper bound Unix timestamp (ms) for message time."),
+        from_me: z
+          .boolean()
+          .optional()
+          .describe("Filter to messages sent by the user when true."),
+        has_attachments: z
+          .boolean()
+          .optional()
+          .describe("Filter to messages with attachments when true."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .default(50)
+          .describe("Maximum results to return (defaults to 50)."),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .default(0)
+          .describe("Result offset for pagination."),
+        include_attachments_meta: z
+          .boolean()
+          .optional()
+          .describe("Include attachment metadata in results when true."),
       },
       outputSchema: {
         results: z.array(searchResultSchema)
@@ -1200,7 +1703,105 @@ function createConfiguredServer(): McpServer {
         return { content: textContent(msg), isError: true };
       }
   }
-);
+  );
+
+  server.registerTool(
+    "history_by_days",
+    {
+      title: "History By Days",
+      description: "Fetch recent messages from a chat or participant over a fixed number of days without providing a text query.",
+      inputSchema: {
+        chat_id: z
+          .number()
+          .int()
+          .optional()
+          .describe("Numeric chat identifier from list_chats."),
+        participant: z
+          .string()
+          .optional()
+          .describe("Handle (phone/email) whose merged conversation should be fetched."),
+        days_back: z
+          .number()
+          .int()
+          .min(1)
+          .max(HISTORY_BY_DAYS_MAX)
+          .default(30)
+          .describe("How many days of history to include (default 30)."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .default(100)
+          .describe("Maximum number of messages to return (default 100)."),
+        include_attachments_meta: z
+          .boolean()
+          .optional()
+          .describe("Include attachment metadata for returned messages."),
+      },
+      outputSchema: {
+        summary: z.string(),
+        results: z.array(normalizedMessageSchema),
+      },
+    },
+    async ({ chat_id, participant, days_back, limit, include_attachments_meta }) => {
+      if (chat_id == null && !participant) {
+        return {
+          content: textContent("Provide chat_id or participant."),
+          isError: true,
+        };
+      }
+      const effectiveDays = clampNumber(days_back ?? 30, 1, HISTORY_BY_DAYS_MAX);
+      const effectiveLimit = clampNumber(limit ?? 100, 1, 500);
+      const fromUnix = Date.now() - effectiveDays * 86_400_000;
+      try {
+        const rows = await searchMessages({
+          query: "",
+          chatId: chat_id ?? undefined,
+          participant: participant ?? undefined,
+          fromUnixMs: fromUnix,
+          limit: effectiveLimit,
+          includeAttachmentsMeta: !!include_attachments_meta,
+        });
+        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
+        const summaryParts = [
+          `${normalized.length} messages`,
+          `days_back=${effectiveDays}`,
+          `limit=${effectiveLimit}`,
+        ];
+        if (chat_id != null) summaryParts.push(`chat_id=${chat_id}`);
+        if (participant) summaryParts.push(`participant=${participant}`);
+        const summary = summaryParts.join(" | ");
+        logger.info("history_by_days", {
+          chat_id: chat_id ?? null,
+          participant: participant ?? null,
+          days_back: effectiveDays,
+          limit: effectiveLimit,
+          result_count: normalized.length,
+        });
+        const structuredContent = {
+          summary,
+          results: normalized,
+        } as const;
+        return {
+          content: textContent(JSON.stringify(structuredContent, null, 2)),
+          structuredContent,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("history_by_days_failed", {
+          chat_id: chat_id ?? null,
+          participant: participant ?? null,
+          days_back: effectiveDays,
+          error: message,
+        });
+        return {
+          content: textContent(`Failed to fetch history by days. Error: ${message}`),
+          isError: true,
+        };
+      }
+    }
+  );
 
   // connectors-compatible search tool (ChatGPT Pro, Deep Research, API connectors)
   server.registerTool(
@@ -1475,12 +2076,31 @@ function createConfiguredServer(): McpServer {
   server.registerTool(
     "context_around_message",
     {
+      title: "Context Around Message",
       description: "Fetch N messages before and after a message_rowid within its chat (ordered by time).",
       inputSchema: {
-        message_rowid: z.number().int(),
-        before: z.number().int().min(0).max(200).default(10),
-        after: z.number().int().min(0).max(200).default(10),
-        include_attachments_meta: z.boolean().optional(),
+        message_rowid: z
+          .number()
+          .int()
+          .describe("Anchor message_rowid to center the window on."),
+        before: z
+          .number()
+          .int()
+          .min(0)
+          .max(200)
+          .default(10)
+          .describe("Number of messages before the anchor to include."),
+        after: z
+          .number()
+          .int()
+          .min(0)
+          .max(200)
+          .default(10)
+          .describe("Number of messages after the anchor to include."),
+        include_attachments_meta: z
+          .boolean()
+          .optional()
+          .describe("Include attachment metadata in the returned window."),
       },
       outputSchema: {
         messages: z.array(normalizedMessageSchema)
@@ -1500,10 +2120,21 @@ function createConfiguredServer(): McpServer {
   server.registerTool(
     "get_attachments",
     {
+      title: "Get Attachments",
       description: "Fetch attachment metadata and resolved file paths for specific message row IDs (per-message cap enforced).",
       inputSchema: {
-        message_rowids: z.array(z.number().int()).min(1).max(50),
-        per_message_cap: z.number().int().min(1).max(10).default(5),
+        message_rowids: z
+          .array(z.number().int())
+          .min(1)
+          .max(50)
+          .describe("List of message_rowid values to inspect for attachments."),
+        per_message_cap: z
+          .number()
+          .int()
+          .min(1)
+          .max(10)
+          .default(5)
+          .describe("Maximum attachments to return per message."),
       },
       outputSchema: {
         attachments: z.array(attachmentRecordSchema),
@@ -1528,17 +2159,54 @@ function createConfiguredServer(): McpServer {
   server.registerTool(
     "search_messages_safe",
     {
-      description: "Global search with required scope: must provide chat_id, participant, or days_back (defaults to 30). Hard cap on limit.",
+      title: "Search Messages Safe",
+      description: "Search or fetch recent conversation history with mandatory scope (chat, participant, or days_back ≤ 365).",
       inputSchema: {
-        query: z.string().min(1),
-        chat_id: z.number().int().optional(),
-        participant: z.string().optional(),
-        days_back: z.number().int().min(1).max(365).default(30),
-        from_me: z.boolean().optional(),
-        has_attachments: z.boolean().optional(),
-        limit: z.number().int().min(1).max(200).default(50),
-        offset: z.number().int().min(0).default(0),
-        include_attachments_meta: z.boolean().optional(),
+        query: z
+          .string()
+          .min(1)
+          .describe("Search text to match within conversations."),
+        chat_id: z
+          .number()
+          .int()
+          .optional()
+          .describe("Scope search to this chat identifier."),
+        participant: z
+          .string()
+          .optional()
+          .describe("Handle (phone/email) to scope search to."),
+        days_back: z
+          .number()
+          .int()
+          .min(1)
+          .max(365)
+          .default(30)
+          .describe("When no chat or participant is given, limit search to this many days."),
+        from_me: z
+          .boolean()
+          .optional()
+          .describe("Filter to messages authored by the user."),
+        has_attachments: z
+          .boolean()
+          .optional()
+          .describe("Filter to messages that include attachments."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .default(50)
+          .describe("Maximum number of results to return (defaults to 50)."),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .default(0)
+          .describe("Result offset for pagination."),
+        include_attachments_meta: z
+          .boolean()
+          .optional()
+          .describe("Include attachment metadata in search results when true."),
       },
       outputSchema: {
         results: z.array(searchResultSchema)
@@ -1617,12 +2285,34 @@ function createConfiguredServer(): McpServer {
   server.registerTool(
     "summarize_window",
     {
+      title: "Summarize Window",
       description: "Summarize a small window around an anchor message (by rowid) for low-token analysis.",
       inputSchema: {
-        message_rowid: z.number().int(),
-        before: z.number().int().min(0).max(200).default(50),
-        after: z.number().int().min(0).max(200).default(50),
-        max_chars: z.number().int().min(200).max(20000).default(2000),
+        message_rowid: z
+          .number()
+          .int()
+          .describe("Anchor message_rowid to summarize around."),
+        before: z
+          .number()
+          .int()
+          .min(0)
+          .max(200)
+          .default(50)
+          .describe("Number of messages before the anchor to consider."),
+        after: z
+          .number()
+          .int()
+          .min(0)
+          .max(200)
+          .default(50)
+          .describe("Number of messages after the anchor to consider."),
+        max_chars: z
+          .number()
+          .int()
+          .min(200)
+          .max(20000)
+          .default(2000)
+          .describe("Character budget for the returned summary lines."),
       },
       outputSchema: {
         summary: z.string(),
@@ -1678,6 +2368,62 @@ type HttpLaunchOptions = {
 };
 
 type LaunchOptions = { mode: "stdio" } | HttpLaunchOptions;
+
+type OAuthSetupResult = {
+  guard: RequestHandler;
+  protectHealth: boolean;
+};
+
+function configureOAuth(app: express.Express): OAuthSetupResult | null {
+  let config: OAuthRuntimeConfig | null = null;
+  try {
+    config = loadOAuthRuntimeConfig();
+  } catch (error) {
+    logger.error("Failed to initialize OAuth configuration", error);
+    throw error;
+  }
+
+  if (!config) {
+    return null;
+  }
+
+  const { authOptions, trustProxy, protectHealth, sessionInfoPath } = config;
+
+  logger.info("OAuth protection enabled for HTTP server", {
+    issuer: authOptions.issuerBaseURL,
+    baseURL: authOptions.baseURL,
+    authRequired: authOptions.authRequired ?? false,
+    protectHealth,
+  });
+
+  if (trustProxy > 0) {
+    app.set("trust proxy", trustProxy);
+  }
+
+  app.use(auth(authOptions));
+
+  const rawGuard = requiresAuth();
+  const guard: RequestHandler = (req, res, next) => {
+    if (req.method === "OPTIONS") {
+      next();
+      return;
+    }
+    rawGuard(req, res, next);
+  };
+
+  if (sessionInfoPath) {
+    app.get(sessionInfoPath, guard, (req: Request, res: Response) => {
+      const authenticated = req.oidc?.isAuthenticated?.() ?? false;
+      res.json({
+        authenticated,
+        user: req.oidc?.user ?? null,
+        idTokenClaims: req.oidc?.idTokenClaims ?? null,
+      });
+    });
+  }
+
+  return { guard, protectHealth };
+}
 
 function parseLaunchOptions(): LaunchOptions {
   const args = process.argv.slice(2);
@@ -1802,6 +2548,19 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
       exposedHeaders: ["Mcp-Session-Id"],
       allowedHeaders: ["Content-Type", "mcp-session-id"],
     }));
+  }
+
+  const oauthSetup = configureOAuth(app);
+  const authGuard = oauthSetup?.guard ?? null;
+  if (authGuard) {
+    app.use("/mcp", authGuard);
+    if (options.enableSseFallback) {
+      app.use("/messages", authGuard);
+      app.use("/sse", authGuard);
+    }
+    if (oauthSetup?.protectHealth) {
+      app.use("/health", authGuard);
+    }
   }
 
   const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: McpServer }>();
