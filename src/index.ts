@@ -803,6 +803,7 @@ type ConversationResourcePayload = {
     unread_count: number;
     last_message_unix_ms: number | null;
     last_message_iso: string | null;
+    title: string;
   };
   messages: NormalizedMessage[];
 };
@@ -870,6 +871,11 @@ async function buildConversationResourcePayload(selector: string, rawValue: stri
   });
 
   const lastUnix = appleEpochToUnixMs(chatRow.last_message_date);
+  const participants = extractParticipantsList(chatRow.participants);
+  const chatTitle =
+    chatRow.display_name?.trim?.() ||
+    (participants.length ? participants.join(", ") : chatRow.guid) ||
+    `chat-${chatRow.chat_id}`;
   return {
     generated_at: new Date().toISOString(),
     selector: normalizedSelector,
@@ -879,10 +885,11 @@ async function buildConversationResourcePayload(selector: string, rawValue: stri
       chat_id: chatRow.chat_id,
       guid: chatRow.guid ?? null,
       display_name: chatRow.display_name ?? null,
-      participants: extractParticipantsList(chatRow.participants),
+      participants,
       unread_count: Number(chatRow.unread_count ?? 0),
       last_message_unix_ms: lastUnix,
       last_message_iso: toIsoUtc(lastUnix),
+      title: chatTitle,
     },
     messages: normalized,
   };
@@ -3057,20 +3064,32 @@ function createConfiguredServer(): McpServer {
       const chats = await listChats(CONVERSATION_RESOURCE_LIST_LIMIT);
       const resources = chats.map((chat) => {
         const participants = extractParticipantsList(chat.participants);
-        const label =
-          chat.display_name?.trim?.() ||
-          (participants.length ? participants.join(", ") : chat.guid) ||
-          `chat-${chat.chat_id}`;
+        const baseLabel = chat.display_name?.trim?.();
+        const participantLabel = participants.length ? participants.join(", ") : chat.guid;
+        const label = baseLabel || participantLabel || `chat-${chat.chat_id}`;
         const lastUnix = appleEpochToUnixMs(chat.last_message_date);
+        const lastIso = toIsoUtc(lastUnix);
+        const unreadCount = Number(chat.unread_count ?? 0);
+        const descriptionParts: string[] = [];
+        if (participants.length) {
+          descriptionParts.push(`Participants: ${participants.join(", ")}`);
+        }
+        if (unreadCount > 0) {
+          descriptionParts.push(`${unreadCount} unread`);
+        }
+        if (lastIso) {
+          descriptionParts.push(`Last activity ${lastIso}`);
+        }
+        const description = descriptionParts.length ? descriptionParts.join(" • ") : "Conversation transcript";
         return {
           uri: `messages://conversation/chat-id/${encodeURIComponent(String(chat.chat_id))}`,
           name: label,
-          description:
-            participants.length > 0
-              ? `Participants: ${participants.join(", ")}`
-              : `Chat ${chat.chat_id}`,
+          title: `Conversation: ${label}`,
+          description,
           mimeType: "application/json",
-          last_message_iso: toIsoUtc(lastUnix),
+          last_message_iso: lastIso,
+          participants,
+          unread_count: unreadCount,
         };
       });
       return { resources };
