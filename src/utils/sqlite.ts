@@ -601,6 +601,64 @@ export async function listChats(limit = 50, options: ListChatsOptions = {}): Pro
   return rows;
 }
 
+export async function getChatById(chatId: number): Promise<ChatRow | null> {
+  if (!Number.isFinite(chatId) || chatId <= 0) return null;
+  const db = getChatDbPath();
+  const hasUnreadCountColumn = await tableHasColumn(db, "chat", "unread_count");
+  let unreadExpr = "COALESCE(c.unread_count, 0)";
+  if (!hasUnreadCountColumn) {
+    const [hasIsReadColumn, hasLastReadTimestamp] = await Promise.all([
+      tableHasColumn(db, "message", "is_read"),
+      tableHasColumn(db, "chat", "last_read_message_timestamp"),
+    ]);
+
+    const computedUnreadPredicates = ["mu.is_from_me = 0"];
+    if (hasIsReadColumn) {
+      computedUnreadPredicates.push("COALESCE(mu.is_read, 0) = 0");
+    } else if (hasLastReadTimestamp) {
+      computedUnreadPredicates.push("mu.date > COALESCE(c.last_read_message_timestamp, 0)");
+    } else {
+      computedUnreadPredicates.push("1 = 0");
+    }
+
+    const computedUnreadExpr = `(
+        SELECT COUNT(*)
+        FROM chat_message_join cmju
+        JOIN message mu ON mu.ROWID = cmju.message_id
+        WHERE cmju.chat_id = c.ROWID
+          AND ${computedUnreadPredicates.join(" AND ")}
+      )`;
+    unreadExpr = `COALESCE(${computedUnreadExpr}, 0)`;
+  }
+
+  const sql = `
+    WITH last_msg AS (
+      SELECT cmj.chat_id, MAX(m.date) AS last_message_date
+      FROM chat_message_join cmj
+      JOIN message m ON m.ROWID = cmj.message_id
+      WHERE cmj.chat_id = ${Math.floor(chatId)}
+      GROUP BY cmj.chat_id
+    )
+    SELECT c.ROWID AS chat_id,
+           c.guid AS guid,
+           c.display_name AS display_name,
+           ${unreadExpr} AS unread_count,
+           lm.last_message_date AS last_message_date,
+           (
+             SELECT GROUP_CONCAT(DISTINCT h.id)
+             FROM chat_handle_join ch
+             JOIN handle h ON h.ROWID = ch.handle_id
+             WHERE ch.chat_id = c.ROWID
+           ) AS participants
+    FROM chat c
+    LEFT JOIN last_msg lm ON lm.chat_id = c.ROWID
+    WHERE c.ROWID = ${Math.floor(chatId)}
+    LIMIT 1;`;
+
+  const rows = (await runSqliteJSON(db, sql)) as ChatRow[];
+  return rows[0] ?? null;
+}
+
 export async function getMessagesByChatId(chatId: number, limit = 50): Promise<MessageRow[]> {
   const db = getChatDbPath();
   const select = await buildMessageSelect(db);

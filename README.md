@@ -11,6 +11,7 @@ A Model Context Protocol (MCP) server that lets AI assistants interact with macO
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
 - [Tool Reference](#tool-reference)
+- [Resources](#resources)
 - [Configuration](#configuration)
 - [Versioning & Support](#versioning--support)
 - [Development](#development)
@@ -23,6 +24,8 @@ A Model Context Protocol (MCP) server that lets AI assistants interact with macO
 ## Overview
 
 `messages-app-mcp` exposes Messages.app over MCP transports (stdio and optional Streamable HTTP). The server is designed for local use: it reads `~/Library/Messages/chat.db` in read-only mode and delegates outgoing sends to AppleScript.
+
+> **New in 2.1** – Streamable HTTP now advertises MCP resources. The server publishes a live inbox snapshot (`messages://inbox`) and parameterised conversation transcripts via `messages://conversation/{selector}/{value}`. Codex can subscribe to these without calling tools; see [Resources](#resources) for payload details.
 
 ## Key Features
 
@@ -93,6 +96,33 @@ The binary published on npm (installable via pnpm) is identical to `dist/index.j
 | `applescript_handler_template` | Generates a starter AppleScript for message events (received/sent/transfer). | Save under `~/Library/Application Scripts/com.apple.iChat/`. |
 | `search` / `fetch` | Connector-friendly tools for ChatGPT Pro / Deep Research (Streamable HTTP mode). | Emit JSON strings matching MCP connector expectations. |
 
+Implementation note: metadata-oriented tools share a single AppleScript dispatcher that returns normalized JSON, so the Node host mostly forwards results without extra shaping—keeping agent context lean while leaning on macOS automation for the heavy lifting.
+
+## Resources
+
+Resources complement the tool surface by exposing read-only feeds that Codex (and other MCP clients) can subscribe to without invoking a tool.
+
+| Resource | Description | Payload |
+| -------- | ----------- | ------- |
+| `messages://inbox` | Rolling snapshot of the most recent conversations with unread counts, participants, and the latest normalized message. The list is capped by `MESSAGES_MCP_INBOX_RESOURCE_LIMIT` (default 15). | JSON document `{ generated_at, total_conversations, total_unread, conversations[] }`. Each entry includes `chat_id`, `guid`, `display_name`, `participants[]`, `unread_count`, and `latest_message` (normalized schema shared with tools). |
+| `messages://conversation/{selector}/{value}` | Template that resolves a specific transcript. Supported selectors: `chat-id`, `chat-guid`, `chat-name`, and `participant`. The candidate list in `resources/list` is capped by `MESSAGES_MCP_CONVERSATION_LIST_LIMIT` (default 20). | JSON document `{ generated_at, selector, value, target, chat, messages[] }`. Messages are sorted oldest→newest and limited by `MESSAGES_MCP_CONVERSATION_RESOURCE_LIMIT` (default 60). |
+
+The Streamable HTTP manifest advertises both endpoints, so Codex can call `resources/list` to discover the inbox plus curated conversation URIs, or `resources/templates/list` followed by `resources/read` to resolve arbitrary selectors.
+
+> Tip: the server expects HTTP clients to send `Accept: application/json, text/event-stream` during initialization. Codex CLI v0.46+ supports this via RMCP; update `~/.codex/config.toml` accordingly:
+> 
+> ```toml
+> experimental_use_rmcp_client = true
+> 
+> [mcp_servers.messages]
+> url = "http://127.0.0.1:8002/mcp"
+> accept = "application/json, text/event-stream"
+> startup_timeout_sec = 20
+> tool_timeout_sec = 60
+> ```
+> 
+> Without the combined Accept header the server returns `406 Not Acceptable` for the `initialize` request, which surfaces in Codex as a transport handshake failure.
+
 ### Recency & search scope
 
 - **`history_by_days`** is the quickest way to say “give me the last *N* days” for a merged conversation: supply `chat_id` or `participant`, optionally enable `include_attachments_meta`, and it returns normalized rows sorted oldest→newest.
@@ -125,24 +155,24 @@ If a message body only exists in `attributedBody`, the MCP now decodes it into `
 
 Codex CLI v0.46+ can talk to this server over the [streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) transport. To try it locally:
 
-1. Start the HTTP server:
+1. Start the stack (Messages MCP + optional mcpo proxy):
 
    ```bash
    pnpm run build
-   pnpm run start:http
+   MCPO_API_KEY=your-shared-secret scripts/mcp-stack.sh start
    ```
 
-   This listens on `http://127.0.0.1:3338/mcp` and enables the SSE fallback under `/sse`.
+   By default the MCP transport binds to `http://127.0.0.1:8002/mcp` and the proxy listens on `http://127.0.0.1:9000`. Disable the proxy with `scripts/mcp-stack.sh start --no-mcpo`.
 
 2. Update `~/.codex/config.toml`:
 
    ```toml
    experimental_use_rmcp_client = true
 
-   [mcp_servers.messages]
-   url = "http://127.0.0.1:3338/mcp"
-   startup_timeout_sec = 20
-   tool_timeout_sec = 60
+[mcp_servers.messages]
+url = "http://127.0.0.1:8002/mcp"
+startup_timeout_sec = 20
+tool_timeout_sec = 60
    ```
 
 3. Restart Codex CLI. The HTTP server can run in a separate terminal or under a process manager.
@@ -169,8 +199,17 @@ Logs note every `send_text` / `send_attachment` attempt (masked recipients), eac
 - `MESSAGES_MCP_SEGMENT_WARNING=10` – emit `payload_warning` when a text spans more than this many segments (set to `0` to disable).
 - `MESSAGES_MCP_MASK_RECIPIENTS=true` – mask phone numbers/emails in responses.
 - `MESSAGES_MCP_HTTP_*` – configure optional Streamable HTTP transport (`PORT`, `HOST`, `ENABLE_SSE`, `CORS_ORIGINS`, etc.).
+- `MESSAGES_MCP_LOG_VIEWER=true` – toggle the built-in browser log viewer. When enabled the agent opens a single local tab with live log streaming and a shutdown button.
+- `MESSAGES_MCP_LOG_VIEWER_AUTO_OPEN=true` – disable to start the viewer server without automatically launching a browser tab.
+- `MESSAGES_MCP_LOG_VIEWER_MAX_CHUNK=262144` – override the maximum number of bytes returned per log poll (default ~256&nbsp;KiB).
+- `MESSAGES_MCP_OSASCRIPT_MODE=file` – controls how AppleScript is invoked. The default (`file`) writes the script to a temporary `.applescript` file before calling `/usr/bin/osascript`, avoiding inline parsing quirks. Set to `inline` to revert to the legacy `-l AppleScript -e` behaviour.
 - `MESSAGES_MCP_HTTP_OIDC_*` – enable OAuth/OIDC protection for the HTTP transport. See [OAuth guard](#oauth-guard) for the full matrix.
+- Optional JSON config: place `messages-mcp.config.json` in the current directory (or point `MESSAGES_MCP_CONFIG` at a file). We also check `~/.config/messages-mcp.config.json`. Values in the config provide defaults for the same knobs as the environment variables (env/CLI still win).
 - `MESSAGES_MCP_CONNECTOR_DAYS_BACK=365`, `MESSAGES_MCP_CONNECTOR_LIMIT=20` – adjust defaults for the connector-facing `search`/`fetch` tools.
+- `MESSAGES_MCP_CONNECTOR_CONTACT`, `MESSAGES_MCP_CONNECTOR_DOCS_URL`, `MESSAGES_MCP_CONNECTOR_PRIVACY_URL`, `MESSAGES_MCP_CONNECTOR_TOS_URL` – override contact/legal metadata surfaced from `/mcp/manifest` for OpenAI connectors and other registries.
+- `MESSAGES_MCP_INBOX_RESOURCE_LIMIT=15` – cap the number of conversations returned by the inbox resource (bounds 5–50).
+- `MESSAGES_MCP_CONVERSATION_RESOURCE_LIMIT=60` – cap the message count returned by each conversation resource payload (bounds 10–200).
+- `MESSAGES_MCP_CONVERSATION_LIST_LIMIT=20` – cap how many conversation URIs appear in `resources/list` (bounds 5–100).
 
 Grant Full Disk Access before running the server so SQLite reads succeed. Without it, `doctor` will warn and send tools will fail silently in Messages.app.
 

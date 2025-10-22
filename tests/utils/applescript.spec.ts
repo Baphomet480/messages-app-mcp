@@ -66,16 +66,29 @@ describe("sendMessageAppleScript", () => {
 
   it("invokes osascript with recipient mode for string targets", async () => {
     mkdtempMock.mockResolvedValueOnce("/tmp/messages-mcp-123");
+    mkdtempMock.mockResolvedValueOnce("/tmp/messages-mcp-script");
     await sendMessageAppleScript("  +15550000000  ", " Hello there ");
 
     expect(execFileMock).toHaveBeenCalledTimes(1);
-    const callArgs = execFileMock.mock.calls[0]!;
-    const args = callArgs[1] as string[];
-    expect(args[0]).toBe("-l");
-    expect(args[1]).toBe("AppleScript");
-    expect(args[3]).toContain("on run argv");
+    const [cmd, args] = execFileMock.mock.calls[0]!;
+    expect(cmd).toBe("/usr/bin/osascript");
+    expect(args[0]).toMatch(/\/tmp\/messages-mcp-script\/script\.applescript$/);
     expect(args.slice(-4)).toEqual(["text_path", "recipient", "+15550000000", "/tmp/messages-mcp-123/body.txt"]);
-    expect(writeFileMock).toHaveBeenCalledWith("/tmp/messages-mcp-123/body.txt", " Hello there ", { encoding: "utf8" });
+
+    expect(writeFileMock).toHaveBeenNthCalledWith(
+      1,
+      "/tmp/messages-mcp-123/body.txt",
+      " Hello there ",
+      { encoding: "utf8" },
+    );
+    expect(writeFileMock).toHaveBeenNthCalledWith(
+      2,
+      "/tmp/messages-mcp-script/script.applescript",
+      expect.stringContaining("on run argv"),
+      { encoding: "utf8" },
+    );
+
+    expect(rmMock).toHaveBeenCalledWith("/tmp/messages-mcp-script", { recursive: true, force: true });
     expect(rmMock).toHaveBeenCalledWith("/tmp/messages-mcp-123", { recursive: true, force: true });
   });
 

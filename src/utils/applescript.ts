@@ -3,19 +3,37 @@ import { homedir, tmpdir } from "node:os";
 import { resolve as resolvePath, isAbsolute, join } from "node:path";
 import { stat, mkdtemp, writeFile, rm } from "node:fs/promises";
 
-export function runAppleScriptInline(script: string, args: string[] = []): Promise<string> {
+const OSASCRIPT_MODE = (process.env.MESSAGES_MCP_OSASCRIPT_MODE ?? "file").toLowerCase();
+
+function execOsaScript(commandArgs: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile("/usr/bin/osascript", ["-l", "AppleScript", "-e", script, ...args], {
+    execFile("/usr/bin/osascript", commandArgs, {
       timeout: 30_000,
       maxBuffer: 10 * 1024 * 1024,
     }, (error, stdout, stderr) => {
       if (error) {
         const err = new Error(`osascript failed: ${stderr || error.message}`);
-        return reject(err);
+        reject(err);
+        return;
       }
       resolve(stdout.toString().trim());
     });
   });
+}
+
+export async function runAppleScriptInline(script: string, args: string[] = []): Promise<string> {
+  if (OSASCRIPT_MODE !== "inline") {
+    const tempDir = await mkdtemp(join(tmpdir(), "messages-mcp-osa-"));
+    const scriptPath = join(tempDir, "script.applescript");
+    try {
+      await writeFile(scriptPath, script, { encoding: "utf8" });
+      return await execOsaScript([scriptPath, ...args]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  return execOsaScript(["-l", "AppleScript", "-e", script, ...args]);
 }
 
 type TargetMode = "recipient" | "chat";
@@ -446,77 +464,80 @@ async function normalizeAttachmentPath(filePath: string): Promise<string> {
   return absolute;
 }
 
-const LIST_ACCOUNTS_SCRIPT = `use framework "Foundation"
+const MESSAGES_COMMAND_SCRIPT = `use framework "Foundation"
 use scripting additions
 
 on run argv
+  if (count of argv) < 1 then error "Command is required."
+  set command to item 1 of argv
+  set argList to {}
+  if (count of argv) > 1 then set argList to items 2 thru -1 of argv
+
+  if command is "list_accounts" then
+    return my encodeJson(my commandListAccounts())
+  else if command is "list_participants" then
+    set filterText to ""
+    if (count of argList) ≥ 1 then set filterText to item 1 of argList
+    return my encodeJson(my commandListParticipants(filterText))
+  else if command is "list_file_transfers" then
+    set includeFinished to false
+    if (count of argList) ≥ 1 then
+      set includeFinished to (item 1 of argList) is "true"
+    end if
+    set limitCount to 0
+    if (count of argList) ≥ 2 then
+      try
+        set limitCount to item 2 of argList as integer
+      end try
+    end if
+    return my encodeJson(my commandListFileTransfers(includeFinished, limitCount))
+  else if command is "accept_file_transfer" then
+    if (count of argList) < 1 then error "Transfer id is required."
+    set transferId to item 1 of argList
+    return my encodeJson(my commandAcceptFileTransfer(transferId))
+  else if command is "login_accounts" then
+    return my encodeJson(my commandLoginAccounts())
+  else if command is "logout_accounts" then
+    return my encodeJson(my commandLogoutAccounts())
+  else if command is "services_snapshot" then
+    return my encodeJson(my commandServicesSnapshot())
+  else
+    error "Unknown Messages command: " & command
+  end if
+end run
+
+on encodeJson(obj)
+  set jsonData to current application's NSJSONSerialization's dataWithJSONObject:obj options:0 |error|:(missing value)
+  if jsonData is missing value then error "Unable to encode Messages payload."
+  set jsonString to current application's NSString's alloc()'s initWithData:jsonData encoding:(current application's NSUTF8StringEncoding)
+  return jsonString as string
+end encodeJson
+
+on commandListAccounts()
   set resultArray to current application's NSMutableArray's array()
   tell application "Messages"
     repeat with acc in accounts
       set recordDict to current application's NSMutableDictionary's dictionary()
-
-      set idText to my safeText(id of acc)
-      recordDict's setObject:idText forKey:"id"
-
-      set serviceText to my safeText(service type of acc)
-      recordDict's setObject:serviceText forKey:"service_type"
-
-      set descriptionText to my safeText(description of acc)
-      recordDict's setObject:descriptionText forKey:"description"
-
-      set connectionText to my safeText(connection status of acc)
-      recordDict's setObject:connectionText forKey:"connection_status"
-
-      set enabledFlag to my safeBool(enabled of acc)
-      recordDict's setObject:(current application's NSNumber's numberWithBool:enabledFlag) forKey:"enabled"
-
+      recordDict's setObject:(my safeText(id of acc)) forKey:"id"
+      recordDict's setObject:(my safeText(service type of acc)) forKey:"service_type"
+      recordDict's setObject:(my safeText(description of acc)) forKey:"description"
+      recordDict's setObject:(my safeText(connection status of acc)) forKey:"connection_status"
+      recordDict's setObject:(current application's NSNumber's numberWithBool:(my safeBool(enabled of acc))) forKey:"enabled"
       resultArray's addObject:recordDict
     end repeat
   end tell
+  return resultArray
+end commandListAccounts
 
-  set jsonData to current application's NSJSONSerialization's dataWithJSONObject:resultArray options:0 |error|:(missing value)
-  if jsonData is missing value then error "Unable to encode account data."
-  set jsonString to current application's NSString's alloc()'s initWithData:jsonData encoding:(current application's NSUTF8StringEncoding)
-  return jsonString as string
-end run
-
-on safeText(possibleValue)
-  try
-    if possibleValue is missing value then return ""
-    return possibleValue as text
-  on error
-    return ""
-  end try
-end safeText
-
-on safeBool(possibleValue)
-  try
-    return possibleValue as boolean
-  on error
-    return false
-  end try
-end safeBool
-`;
-
-const LIST_PARTICIPANTS_SCRIPT = `use framework "Foundation"
-use scripting additions
-
-on run argv
-  set filterText to missing value
-  if (count of argv) ≥ 1 then
-    set filterText to item 1 of argv
-    if filterText is "" then set filterText to missing value
-  end if
-
+on commandListParticipants(filterText)
   set normalizedFilter to ""
-  if filterText is not missing value then
+  if filterText is not missing value and filterText is not "" then
     set normalizedFilter to my lowerText(filterText)
   end if
 
   set resultArray to current application's NSMutableArray's array()
   tell application "Messages"
     repeat with p in participants
-      set idText to my safeText(id of p)
       set handleText to my safeText(handle of p)
       set nameText to my safeText(name of p)
       set firstNameText to my safeText(first name of p)
@@ -528,15 +549,15 @@ on run argv
         if theAccount is not missing value then set accountService to my safeText(service type of theAccount)
       end try
 
-      set shouldSkip to false
+      set matchesFilter to true
       if normalizedFilter is not "" then
-        set joinText to my lowerText(idText & " " & handleText & " " & nameText & " " & firstNameText & " " & lastNameText & " " & fullNameText & " " & accountService)
-        set shouldSkip to joinText does not contain normalizedFilter
+        set joined to my lowerText(handleText & " " & nameText & " " & firstNameText & " " & lastNameText & " " & fullNameText & " " & accountService)
+        if joined does not contain normalizedFilter then set matchesFilter to false
       end if
 
-      if shouldSkip is false then
+      if matchesFilter then
         set recordDict to current application's NSMutableDictionary's dictionary()
-        recordDict's setObject:idText forKey:"id"
+        recordDict's setObject:(my safeText(id of p)) forKey:"id"
         recordDict's setObject:handleText forKey:"handle"
         recordDict's setObject:nameText forKey:"name"
         recordDict's setObject:firstNameText forKey:"first_name"
@@ -547,186 +568,10 @@ on run argv
       end if
     end repeat
   end tell
+  return resultArray
+end commandListParticipants
 
-  set jsonData to current application's NSJSONSerialization's dataWithJSONObject:resultArray options:0 |error|:(missing value)
-  if jsonData is missing value then error "Unable to encode participants data."
-  set jsonString to current application's NSString's alloc()'s initWithData:jsonData encoding:(current application's NSUTF8StringEncoding)
-  return jsonString as string
-end run
-
-on safeText(possibleValue)
-  try
-    if possibleValue is missing value then return ""
-    return possibleValue as text
-  on error
-    return ""
-  end try
-end safeText
-
-on lowerText(possibleValue)
-  try
-    if possibleValue is missing value then return ""
-    return (possibleValue as text)'s lowercaseString()
-  on error
-    return ""
-  end try
-end lowerText
-
-`;
-
-const ACCEPT_FILE_TRANSFER_SCRIPT = `use framework "Foundation"
-use scripting additions
-
-on run argv
-  if (count of argv) < 1 then error "A transfer id is required."
-  set transferId to item 1 of argv
-
-  set isoFormatter to current application's NSDateFormatter's alloc()'s init()
-  isoFormatter's setLocale:(current application's NSLocale's localeWithLocaleIdentifier:"en_US_POSIX")
-  isoFormatter's setDateFormat:"yyyy-MM-dd'T'HH:mm:ssXXX"
-  isoFormatter's setTimeZone:(current application's NSTimeZone's timeZoneForSecondsFromGMT:0)
-
-  set recordDict to current application's NSMutableDictionary's dictionary()
-  tell application "Messages"
-    set matchedTransfer to missing value
-    repeat with ft in file transfers
-      try
-        if (id of ft as text) is transferId then
-          set matchedTransfer to ft
-          exit repeat
-        end if
-      end try
-    end repeat
-
-    if matchedTransfer is missing value then
-      error "No file transfer found with id " & transferId
-    end if
-
-    set acceptError to missing value
-    set acceptedFlag to true
-    try
-      accept matchedTransfer
-    on error errMsg
-      set acceptError to errMsg as text
-      set acceptedFlag to false
-    end try
-
-    set statusText to my safeText(transfer status of matchedTransfer)
-    set directionText to my safeText(direction of matchedTransfer)
-    set nameText to my safeText(name of matchedTransfer)
-
-    set filePathString to ""
-    try
-      set filePathString to POSIX path of (file path of matchedTransfer)
-    end try
-
-    set sizeValue to my safeInteger(file size of matchedTransfer)
-    set progressValue to my safeInteger(file progress of matchedTransfer)
-
-    set startedIso to ""
-    set startedUnix to missing value
-    try
-      set startedDate to started of matchedTransfer
-      if startedDate is not missing value then
-        set startedUnix to startedDate's timeIntervalSince1970()
-        set startedIso to (isoFormatter's stringFromDate:startedDate) as string
-      end if
-    end try
-
-    set accountServiceType to ""
-    set accountIdText to ""
-    try
-      set theAccount to account of matchedTransfer
-      if theAccount is not missing value then
-        set accountServiceType to my safeText(service type of theAccount)
-        set accountIdText to my safeText(id of theAccount)
-      end if
-    end try
-
-    set participantHandle to ""
-    set participantName to ""
-    try
-      set theParticipant to participant of matchedTransfer
-      if theParticipant is not missing value then
-        set participantHandle to my safeText(handle of theParticipant)
-        set participantName to my safeText(name of theParticipant)
-      end if
-    end try
-
-    recordDict's setObject:transferId forKey:"id"
-    recordDict's setObject:directionText forKey:"direction"
-    recordDict's setObject:nameText forKey:"name"
-    recordDict's setObject:statusText forKey:"transfer_status"
-    recordDict's setObject:filePathString forKey:"file_path"
-    if sizeValue is missing value then
-      recordDict's setObject:(current application's NSNull's null()) forKey:"file_size"
-    else
-      recordDict's setObject:(current application's NSNumber's numberWithLongLong:sizeValue) forKey:"file_size"
-    end if
-    if progressValue is missing value then
-      recordDict's setObject:(current application's NSNull's null()) forKey:"file_progress"
-    else
-      recordDict's setObject:(current application's NSNumber's numberWithLongLong:progressValue) forKey:"file_progress"
-    end if
-    if startedUnix is missing value then
-      recordDict's setObject:(current application's NSNull's null()) forKey:"started_unix"
-    else
-      recordDict's setObject:(current application's NSNumber's numberWithDouble:startedUnix) forKey:"started_unix"
-    end if
-    recordDict's setObject:startedIso forKey:"started_iso"
-    recordDict's setObject:accountServiceType forKey:"account_service_type"
-    recordDict's setObject:accountIdText forKey:"account_id"
-    recordDict's setObject:participantHandle forKey:"participant_handle"
-    recordDict's setObject:participantName forKey:"participant_name"
-    recordDict's setObject:(acceptedFlag as boolean) forKey:"accepted"
-    if acceptError is missing value then
-      recordDict's setObject:"" forKey:"error"
-    else
-      recordDict's setObject:acceptError forKey:"error"
-    end if
-  end tell
-
-  set jsonData to current application's NSJSONSerialization's dataWithJSONObject:recordDict options:0 |error|:(missing value)
-  if jsonData is missing value then error "Unable to encode acceptance result."
-  set jsonString to current application's NSString's alloc()'s initWithData:jsonData encoding:(current application's NSUTF8StringEncoding)
-  return jsonString as string
-end run
-
-on safeText(possibleValue)
-  try
-    if possibleValue is missing value then return ""
-    return possibleValue as text
-  on error
-    return ""
-  end try
-end safeText
-
-on safeInteger(possibleValue)
-  try
-    if possibleValue is missing value then return missing value
-    return possibleValue as integer
-  on error
-    return missing value
-  end try
-end safeInteger
-`;
-
-const LIST_FILE_TRANSFERS_SCRIPT = `use framework "Foundation"
-use scripting additions
-
-on run argv
-  set includeFinished to false
-  set limitCount to 0
-  if (count of argv) ≥ 1 then
-    set includeFinishedInput to item 1 of argv
-    if includeFinishedInput is "true" then set includeFinished to true
-  end if
-  if (count of argv) ≥ 2 then
-    try
-      set limitCount to item 2 of argv as integer
-    end try
-  end if
-
+on commandListFileTransfers(includeFinished, limitCount)
   set isoFormatter to current application's NSDateFormatter's alloc()'s init()
   isoFormatter's setLocale:(current application's NSLocale's localeWithLocaleIdentifier:"en_US_POSIX")
   isoFormatter's setDateFormat:"yyyy-MM-dd'T'HH:mm:ssXXX"
@@ -740,16 +585,9 @@ on run argv
       set statusText to my safeText(transfer status of ft)
       if includeFinished or statusText is not "finished" then
         set recordDict to current application's NSMutableDictionary's dictionary()
-
-        set idText to my safeText(id of ft)
-        recordDict's setObject:idText forKey:"id"
-
-        set nameText to my safeText(name of ft)
-        recordDict's setObject:nameText forKey:"name"
-
-        set directionText to my safeText(direction of ft)
-        recordDict's setObject:directionText forKey:"direction"
-
+        recordDict's setObject:(my safeText(id of ft)) forKey:"id"
+        recordDict's setObject:(my safeText(name of ft)) forKey:"name"
+        recordDict's setObject:(my safeText(direction of ft)) forKey:"direction"
         recordDict's setObject:statusText forKey:"transfer_status"
 
         set filePathString to ""
@@ -819,11 +657,158 @@ on run argv
     end repeat
   end tell
 
-  set jsonData to current application's NSJSONSerialization's dataWithJSONObject:resultArray options:0 |error|:(missing value)
-  if jsonData is missing value then error "Unable to encode transfer data."
-  set jsonString to current application's NSString's alloc()'s initWithData:jsonData encoding:(current application's NSUTF8StringEncoding)
-  return jsonString as string
-end run
+  return resultArray
+end commandListFileTransfers
+
+on commandAcceptFileTransfer(transferId)
+  set isoFormatter to current application's NSDateFormatter's alloc()'s init()
+  isoFormatter's setLocale:(current application's NSLocale's localeWithLocaleIdentifier:"en_US_POSIX")
+  isoFormatter's setDateFormat:"yyyy-MM-dd'T'HH:mm:ssXXX"
+  isoFormatter's setTimeZone:(current application's NSTimeZone's timeZoneForSecondsFromGMT:0)
+
+  set recordDict to current application's NSMutableDictionary's dictionary()
+  tell application "Messages"
+    set matchedTransfer to missing value
+    repeat with ft in file transfers
+      try
+        if (id of ft as text) is transferId then
+          set matchedTransfer to ft
+          exit repeat
+        end if
+      end try
+    end repeat
+
+    if matchedTransfer is missing value then
+      error "No file transfer found with id " & transferId
+    end if
+
+    set acceptError to missing value
+    set acceptedFlag to true
+    try
+      accept matchedTransfer
+    on error errMsg
+      set acceptError to errMsg as text
+      set acceptedFlag to false
+    end try
+
+    recordDict's setObject:transferId forKey:"id"
+    recordDict's setObject:(my safeText(name of matchedTransfer)) forKey:"name"
+    recordDict's setObject:(my safeText(direction of matchedTransfer)) forKey:"direction"
+    recordDict's setObject:(my safeText(transfer status of matchedTransfer)) forKey:"transfer_status"
+
+    set filePathString to ""
+    try
+      set filePathString to POSIX path of (file path of matchedTransfer)
+    end try
+    recordDict's setObject:filePathString forKey:"file_path"
+
+    set sizeValue to my safeInteger(file size of matchedTransfer)
+    if sizeValue is missing value then
+      recordDict's setObject:(current application's NSNull's null()) forKey:"file_size"
+    else
+      recordDict's setObject:(current application's NSNumber's numberWithLongLong:sizeValue) forKey:"file_size"
+    end if
+
+    set progressValue to my safeInteger(file progress of matchedTransfer)
+    if progressValue is missing value then
+      recordDict's setObject:(current application's NSNull's null()) forKey:"file_progress"
+    else
+      recordDict's setObject:(current application's NSNumber's numberWithLongLong:progressValue) forKey:"file_progress"
+    end if
+
+    set startedIso to ""
+    set startedUnix to missing value
+    try
+      set startedDate to started of matchedTransfer
+      if startedDate is not missing value then
+        set startedUnix to startedDate's timeIntervalSince1970()
+        set startedIso to (isoFormatter's stringFromDate:startedDate) as string
+      end if
+    end try
+    if startedUnix is missing value then
+      recordDict's setObject:(current application's NSNull's null()) forKey:"started_unix"
+    else
+      recordDict's setObject:(current application's NSNumber's numberWithDouble:startedUnix) forKey:"started_unix"
+    end if
+    recordDict's setObject:startedIso forKey:"started_iso"
+
+    set accountServiceType to ""
+    set accountIdText to ""
+    try
+      set theAccount to account of matchedTransfer
+      if theAccount is not missing value then
+        set accountServiceType to my safeText(service type of theAccount)
+        set accountIdText to my safeText(id of theAccount)
+      end if
+    end try
+    recordDict's setObject:accountServiceType forKey:"account_service_type"
+    recordDict's setObject:accountIdText forKey:"account_id"
+
+    set participantHandle to ""
+    set participantName to ""
+    try
+      set theParticipant to participant of matchedTransfer
+      if theParticipant is not missing value then
+        set participantHandle to my safeText(handle of theParticipant)
+        set participantName to my safeText(name of theParticipant)
+      end if
+    end try
+    recordDict's setObject:participantHandle forKey:"participant_handle"
+    recordDict's setObject:participantName forKey:"participant_name"
+
+    recordDict's setObject:(acceptedFlag as boolean) forKey:"accepted"
+    if acceptError is missing value then
+      recordDict's setObject:"" forKey:"error"
+    else
+      recordDict's setObject:acceptError forKey:"error"
+    end if
+  end tell
+
+  return recordDict
+end commandAcceptFileTransfer
+
+on commandLoginAccounts()
+  tell application "Messages"
+    log in
+  end tell
+  set recordDict to current application's NSMutableDictionary's dictionary()
+  recordDict's setObject:(current application's NSNumber's numberWithBool:true) forKey:"ok"
+  recordDict's setObject:"OK" forKey:"message"
+  return recordDict
+end commandLoginAccounts
+
+on commandLogoutAccounts()
+  tell application "Messages"
+    log out
+  end tell
+  set recordDict to current application's NSMutableDictionary's dictionary()
+  recordDict's setObject:(current application's NSNumber's numberWithBool:true) forKey:"ok"
+  recordDict's setObject:"OK" forKey:"message"
+  return recordDict
+end commandLogoutAccounts
+
+on commandServicesSnapshot()
+  set servicesArray to current application's NSMutableArray's array()
+  set accountsArray to current application's NSMutableArray's array()
+
+  tell application "Messages"
+    try
+      repeat with svc in services
+        servicesArray's addObject:(my safeText(service type of svc))
+      end repeat
+    end try
+    try
+      repeat with acc in accounts
+        accountsArray's addObject:(my safeText(service type of acc))
+      end repeat
+    end try
+  end tell
+
+  set resultDict to current application's NSMutableDictionary's dictionary()
+  resultDict's setObject:servicesArray forKey:"services"
+  resultDict's setObject:accountsArray forKey:"accounts"
+  return resultDict
+end commandServicesSnapshot
 
 on safeText(possibleValue)
   try
@@ -834,6 +819,14 @@ on safeText(possibleValue)
   end try
 end safeText
 
+on safeBool(possibleValue)
+  try
+    return possibleValue as boolean
+  on error
+    return false
+  end try
+end safeBool
+
 on safeInteger(possibleValue)
   try
     if possibleValue is missing value then return missing value
@@ -842,29 +835,48 @@ on safeInteger(possibleValue)
     return missing value
   end try
 end safeInteger
+
+on lowerText(possibleValue)
+  try
+    if possibleValue is missing value then return ""
+    return (possibleValue as text)'s lowercaseString()
+  on error
+    return ""
+  end try
+end lowerText
 `;
 
-const LOGIN_SCRIPT = `on run argv
-  tell application "Messages"
-    try
-      log in
-      return "OK"
-    on error errMsg
-      error errMsg
-    end try
-  end tell
-end run`;
+async function runMessagesCommand<T = unknown>(command: string, args: string[] = []): Promise<T> {
+  const output = await runAppleScriptInline(MESSAGES_COMMAND_SCRIPT, [command, ...args]).catch((error) => {
+    throw new Error(`Messages command '${command}' failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
+  const normalized = output && output.length ? output : "null";
+  try {
+    return JSON.parse(normalized) as T;
+  } catch (error) {
+    throw new Error(`Unable to parse JSON for '${command}': ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
-const LOGOUT_SCRIPT = `on run argv
-  tell application "Messages"
-    try
-      log out
-      return "OK"
-    on error errMsg
-      error errMsg
-    end try
-  end tell
-end run`;
+function asString(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  return String(value);
+}
+
+function asBoolean(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") return value.toLowerCase() === "true";
+  return false;
+}
+
+function asNumberOrNull(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 export type MessagesAccountInfo = {
   id: string;
@@ -875,24 +887,21 @@ export type MessagesAccountInfo = {
 };
 
 export async function listMessagesAccounts(): Promise<MessagesAccountInfo[]> {
-  const raw = await runAppleScriptInline(LIST_ACCOUNTS_SCRIPT).catch((error) => {
-    throw new Error(`Failed to enumerate Messages accounts via AppleScript: ${error instanceof Error ? error.message : String(error)}`);
-  });
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw) as Partial<MessagesAccountInfo>[];
-    return parsed
-      .map((entry) => ({
-        id: entry.id ?? "",
-        service_type: entry.service_type ?? "",
-        description: entry.description ?? "",
-        connection_status: entry.connection_status ?? "",
-        enabled: Boolean(entry.enabled),
-      }))
-      .filter((entry) => entry.id || entry.service_type || entry.description || entry.connection_status);
-  } catch (error) {
-    throw new Error(`Unable to parse Messages accounts JSON: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  const data = await runMessagesCommand<unknown[] | null>("list_accounts");
+  if (!Array.isArray(data)) return [];
+  return data
+    .map((entry) => (entry && typeof entry === "object" ? entry : {}))
+    .map((entry) => {
+      const record = entry as Record<string, unknown>;
+      return {
+        id: asString(record.id),
+        service_type: asString(record.service_type),
+        description: asString(record.description),
+        connection_status: asString(record.connection_status),
+        enabled: asBoolean(record.enabled),
+      } satisfies MessagesAccountInfo;
+    })
+    .filter((entry) => entry.id || entry.service_type || entry.description || entry.connection_status);
 }
 
 export type MessagesParticipantInfo = {
@@ -906,28 +915,24 @@ export type MessagesParticipantInfo = {
 };
 
 export async function listMessagesParticipants(filter?: string): Promise<MessagesParticipantInfo[]> {
-  const args = [] as string[];
-  if (typeof filter === "string" && filter.trim().length > 0) {
+  const args: string[] = [];
+  if (filter && filter.trim().length > 0) {
     args.push(filter.trim());
   }
-  const raw = await runAppleScriptInline(LIST_PARTICIPANTS_SCRIPT, args).catch((error) => {
-    throw new Error(`Failed to enumerate Messages participants via AppleScript: ${error instanceof Error ? error.message : String(error)}`);
+  const data = await runMessagesCommand<unknown[] | null>("list_participants", args);
+  if (!Array.isArray(data)) return [];
+  return data.map((entry) => {
+    const record = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+    return {
+      id: asString(record.id),
+      handle: asString(record.handle),
+      name: asString(record.name),
+      first_name: asString(record.first_name),
+      last_name: asString(record.last_name),
+      full_name: asString(record.full_name),
+      account_service_type: asString(record.account_service_type),
+    } satisfies MessagesParticipantInfo;
   });
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw) as Partial<MessagesParticipantInfo>[];
-    return parsed.map((entry) => ({
-      id: entry.id ?? "",
-      handle: entry.handle ?? "",
-      name: entry.name ?? "",
-      first_name: entry.first_name ?? "",
-      last_name: entry.last_name ?? "",
-      full_name: entry.full_name ?? "",
-      account_service_type: entry.account_service_type ?? "",
-    }));
-  } catch (error) {
-    throw new Error(`Unable to parse Messages participants JSON: ${error instanceof Error ? error.message : String(error)}`);
-  }
 }
 
 export type MessagesFileTransferInfo = {
@@ -953,30 +958,26 @@ export async function listMessagesFileTransfers(options: { includeFinished?: boo
   if (limit && Number.isFinite(limit) && limit > 0) {
     args.push(String(Math.trunc(limit)));
   }
-  const raw = await runAppleScriptInline(LIST_FILE_TRANSFERS_SCRIPT, args).catch((error) => {
-    throw new Error(`Failed to enumerate Messages file transfers via AppleScript: ${error instanceof Error ? error.message : String(error)}`);
+  const data = await runMessagesCommand<unknown[] | null>("list_file_transfers", args);
+  if (!Array.isArray(data)) return [];
+  return data.map((entry) => {
+    const record = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+    return {
+      id: asString(record.id),
+      name: asString(record.name),
+      direction: asString(record.direction),
+      transfer_status: asString(record.transfer_status),
+      file_path: asString(record.file_path),
+      file_size: asNumberOrNull(record.file_size),
+      file_progress: asNumberOrNull(record.file_progress),
+      started_unix: asNumberOrNull(record.started_unix),
+      started_iso: asString(record.started_iso),
+      account_service_type: asString(record.account_service_type),
+      account_id: asString(record.account_id),
+      participant_handle: asString(record.participant_handle),
+      participant_name: asString(record.participant_name),
+    } satisfies MessagesFileTransferInfo;
   });
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw) as Partial<MessagesFileTransferInfo>[];
-    return parsed.map((entry) => ({
-      id: entry.id ?? "",
-      name: entry.name ?? "",
-      direction: entry.direction ?? "",
-      transfer_status: entry.transfer_status ?? "",
-      file_path: entry.file_path ?? "",
-      file_size: typeof entry.file_size === "number" ? entry.file_size : entry.file_size == null ? null : Number(entry.file_size),
-      file_progress: typeof entry.file_progress === "number" ? entry.file_progress : entry.file_progress == null ? null : Number(entry.file_progress),
-      started_unix: typeof entry.started_unix === "number" ? entry.started_unix : entry.started_unix == null ? null : Number(entry.started_unix),
-      started_iso: entry.started_iso ?? "",
-      account_service_type: entry.account_service_type ?? "",
-      account_id: entry.account_id ?? "",
-      participant_handle: entry.participant_handle ?? "",
-      participant_name: entry.participant_name ?? "",
-    }));
-  } catch (error) {
-    throw new Error(`Unable to parse Messages file transfers JSON: ${error instanceof Error ? error.message : String(error)}`);
-  }
 }
 
 export type MessagesFileTransferAcceptance = MessagesFileTransferInfo & {
@@ -988,47 +989,64 @@ export async function acceptMessagesFileTransfer(id: string): Promise<MessagesFi
   if (!id || !id.trim()) {
     throw new Error("Transfer id must be provided.");
   }
-  const raw = await runAppleScriptInline(ACCEPT_FILE_TRANSFER_SCRIPT, [id.trim()]).catch((error) => {
-    throw new Error(`Failed to accept Messages file transfer: ${error instanceof Error ? error.message : String(error)}`);
-  });
-  if (!raw) {
+  const payload = await runMessagesCommand<Record<string, unknown> | null>("accept_file_transfer", [id.trim()]);
+  if (!payload) {
     throw new Error("No payload returned from AppleScript during file transfer acceptance.");
   }
-  try {
-    const parsed = JSON.parse(raw) as Partial<MessagesFileTransferAcceptance>;
-    return {
-      id: parsed.id ?? id,
-      name: parsed.name ?? "",
-      direction: parsed.direction ?? "",
-      transfer_status: parsed.transfer_status ?? "",
-      file_path: parsed.file_path ?? "",
-      file_size: typeof parsed.file_size === "number" ? parsed.file_size : parsed.file_size == null ? null : Number(parsed.file_size),
-      file_progress: typeof parsed.file_progress === "number" ? parsed.file_progress : parsed.file_progress == null ? null : Number(parsed.file_progress),
-      started_unix: typeof parsed.started_unix === "number" ? parsed.started_unix : parsed.started_unix == null ? null : Number(parsed.started_unix),
-      started_iso: parsed.started_iso ?? "",
-      account_service_type: parsed.account_service_type ?? "",
-      account_id: parsed.account_id ?? "",
-      participant_handle: parsed.participant_handle ?? "",
-      participant_name: parsed.participant_name ?? "",
-      accepted: Boolean(parsed.accepted),
-      error: parsed.error ?? "",
-    };
-  } catch (error) {
-    throw new Error(`Unable to parse acceptance JSON: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  return {
+    id: asString(payload.id) || id,
+    name: asString(payload.name),
+    direction: asString(payload.direction),
+    transfer_status: asString(payload.transfer_status),
+    file_path: asString(payload.file_path),
+    file_size: asNumberOrNull(payload.file_size),
+    file_progress: asNumberOrNull(payload.file_progress),
+    started_unix: asNumberOrNull(payload.started_unix),
+    started_iso: asString(payload.started_iso),
+    account_service_type: asString(payload.account_service_type),
+    account_id: asString(payload.account_id),
+    participant_handle: asString(payload.participant_handle),
+    participant_name: asString(payload.participant_name),
+    accepted: asBoolean(payload.accepted),
+    error: asString(payload.error),
+  } satisfies MessagesFileTransferAcceptance;
+}
+
+export type MessagesServiceSnapshot = {
+  services: string[];
+  accounts: string[];
+};
+
+export async function getMessagesServiceSnapshot(): Promise<MessagesServiceSnapshot> {
+  const payload = await runMessagesCommand<Record<string, unknown> | null>("services_snapshot");
+  const toStringArray = (value: unknown): string[] => {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((entry) => asString(entry).trim())
+      .filter((entry) => entry.length > 0);
+  };
+  return {
+    services: toStringArray(payload?.services),
+    accounts: toStringArray(payload?.accounts),
+  } satisfies MessagesServiceSnapshot;
 }
 
 export async function loginMessagesAccounts(): Promise<void> {
-  await runAppleScriptInline(LOGIN_SCRIPT).catch((error) => {
-    throw new Error(`Failed to trigger Messages login: ${error instanceof Error ? error.message : String(error)}`);
-  });
+  const payload = await runMessagesCommand<Record<string, unknown> | null>("login_accounts");
+  if (!payload || !asBoolean(payload.ok)) {
+    const message = asString(payload?.message) || "Failed to log in Messages accounts.";
+    throw new Error(message);
+  }
 }
 
 export async function logoutMessagesAccounts(): Promise<void> {
-  await runAppleScriptInline(LOGOUT_SCRIPT).catch((error) => {
-    throw new Error(`Failed to trigger Messages logout: ${error instanceof Error ? error.message : String(error)}`);
-  });
+  const payload = await runMessagesCommand<Record<string, unknown> | null>("logout_accounts");
+  if (!payload || !asBoolean(payload.ok)) {
+    const message = asString(payload?.message) || "Failed to log out Messages accounts.";
+    throw new Error(message);
+  }
 }
+
 
 export const MESSAGES_FDA_HINT = "Messages needs Full Disk Access (System Settings → Privacy & Security → Full Disk Access) to send attachments from arbitrary folders.";
 

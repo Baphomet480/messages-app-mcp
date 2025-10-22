@@ -8,8 +8,8 @@ import * as expressOpenIdConnect from "express-openid-connect";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { isInitializeRequest, type LoggingLevel } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
   sendMessageAppleScript,
@@ -35,6 +35,7 @@ import {
   searchMessages,
   contextAroundMessage,
   getAttachmentsForMessages,
+  getChatById,
   getChatIdByGuid,
   getChatIdByDisplayName,
   getChatIdByParticipant,
@@ -43,13 +44,62 @@ import { buildSendFailurePayload, buildSendSuccessPayload } from "./utils/send-r
 import type { MessageLike, SendTargetDescriptor, SendResultPayload } from "./utils/send-result.js";
 import { getVersionInfo, getVersionInfoSync } from "./utils/version.js";
 import { runDoctor } from "./utils/doctor.js";
-import { getLogger } from "./utils/logger.js";
+import { getLogger, getLogFilePath } from "./utils/logger.js";
 import { normalizeMessageText, truncateForLog, estimateSegmentInfo } from "./utils/text-utils.js";
 import type { SegmentInfo } from "./utils/text-utils.js";
 import type { EnrichedMessageRow, AttachmentInfo } from "./utils/sqlite.js";
+import { startLogViewer, type LogViewerHandle } from "./utils/log-viewer.js";
+import { loadMessagesConfig, type MessagesConfig } from "./config.js";
+import { refineSearchIntent } from "./utils/ai-search.js";
 
 const { auth, requiresAuth } = expressOpenIdConnect;
 const logger = getLogger();
+
+type BasicLoggingLevel = Extract<LoggingLevel, "debug" | "info" | "warning" | "error">;
+
+function normalizeLogValue(value: unknown): unknown {
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+    };
+  }
+  return value;
+}
+
+function broadcastLog(level: BasicLoggingLevel, args: unknown[], servers: Iterable<McpServer>): void {
+  switch (level) {
+    case "debug":
+      logger.debug(...args);
+      break;
+    case "info":
+      logger.info(...args);
+      break;
+    case "warning":
+      logger.warn(...args);
+      break;
+    case "error":
+      logger.error(...args);
+      break;
+  }
+
+  const payload = args.length === 0
+    ? null
+    : args.length === 1
+      ? normalizeLogValue(args[0])
+      : args.map((value) => normalizeLogValue(value));
+
+  for (const server of servers) {
+    void server
+      .sendLoggingMessage({
+        level,
+        logger: "messages-app-mcp",
+        data: payload,
+      })
+      .catch(() => {});
+  }
+}
 
 process.on("unhandledRejection", (reason) => {
   logger.error("Unhandled rejection", reason);
@@ -236,6 +286,103 @@ function parseEnvBool(name: string, fallback = false): boolean {
   return fallback;
 }
 
+type LogViewerSettings = {
+  enabled: boolean;
+  autoOpen: boolean;
+  pollIntervalMs?: number;
+};
+
+const envLogViewerEnabledRaw = process.env.MESSAGES_MCP_LOG_VIEWER;
+const envLogViewerAutoOpenRaw = process.env.MESSAGES_MCP_LOG_VIEWER_AUTO_OPEN;
+const envLogViewerPollRaw = process.env.MESSAGES_MCP_LOG_VIEWER_POLL_INTERVAL;
+
+const logViewerEnvOverrides = {
+  enabled: envLogViewerEnabledRaw != null,
+  autoOpen: envLogViewerAutoOpenRaw != null,
+  pollInterval: envLogViewerPollRaw != null,
+};
+
+const logViewerSettings: LogViewerSettings = {
+  enabled: logViewerEnvOverrides.enabled ? parseEnvBool("MESSAGES_MCP_LOG_VIEWER", true) : true,
+  autoOpen: logViewerEnvOverrides.autoOpen ? parseEnvBool("MESSAGES_MCP_LOG_VIEWER_AUTO_OPEN", true) : true,
+  pollIntervalMs: undefined,
+};
+
+if (logViewerEnvOverrides.pollInterval) {
+  const parsedPoll = Number.parseInt(envLogViewerPollRaw ?? "", 10);
+  if (Number.isFinite(parsedPoll)) {
+    logViewerSettings.pollIntervalMs = clampNumber(parsedPoll, 250, 120000);
+  }
+}
+
+let logViewerHandle: LogViewerHandle | null = null;
+let logViewerInitPromise: Promise<LogViewerHandle | null> | null = null;
+
+function applyConfigToLogViewer(config: MessagesConfig): void {
+  const cfg = config.logViewer;
+  if (!cfg) return;
+  if (!logViewerEnvOverrides.enabled && typeof cfg.enabled === "boolean") {
+    logViewerSettings.enabled = cfg.enabled;
+  }
+  if (!logViewerEnvOverrides.autoOpen && typeof cfg.autoOpen === "boolean") {
+    logViewerSettings.autoOpen = cfg.autoOpen;
+  }
+  if (!logViewerEnvOverrides.pollInterval && typeof cfg.pollIntervalMs === "number" && Number.isFinite(cfg.pollIntervalMs)) {
+    logViewerSettings.pollIntervalMs = clampNumber(Math.floor(cfg.pollIntervalMs), 250, 120000);
+  }
+}
+
+async function ensureLogViewer(initialLabel = "logs"): Promise<void> {
+  if (!logViewerSettings.enabled) return;
+  if (!logViewerInitPromise) {
+    logViewerInitPromise = (async () => {
+      try {
+        const logFilePath = getLogFilePath();
+        const handle = await startLogViewer(logFilePath, {
+          autoOpen: logViewerSettings.autoOpen,
+          sessionLabel: initialLabel,
+          pollIntervalMs: logViewerSettings.pollIntervalMs,
+          onShutdownRequest: () => {
+            logger.warn("log_viewer_shutdown_requested");
+            process.nextTick(() => {
+              try {
+                process.kill(process.pid, "SIGINT");
+              } catch {
+                process.exit(0);
+              }
+            });
+          },
+        });
+        logViewerHandle = handle;
+        return handle;
+      } catch (error) {
+        logger.warn("log_viewer_start_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    })();
+  }
+
+  const handle = await logViewerInitPromise;
+  if (handle && logViewerSettings.autoOpen) {
+    handle.open(initialLabel);
+  }
+}
+
+function openLogViewer(): void {
+  if (!logViewerSettings.enabled) return;
+  if (!logViewerSettings.autoOpen) {
+    ensureLogViewer().catch(() => {});
+    return;
+  }
+  if (logViewerHandle) {
+    logViewerHandle.open("logs");
+    return;
+  }
+  ensureLogViewer("logs").catch(() => {});
+}
+
 const DEFAULT_SEGMENT_WARNING_THRESHOLD = 10;
 const SEGMENT_WARNING_THRESHOLD = parseEnvInt(
   "MESSAGES_MCP_SEGMENT_WARNING",
@@ -257,6 +404,82 @@ function parseCsv(raw: string | undefined): string[] {
     .split(",")
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
+}
+
+function formatHostForOrigin(host: string): string {
+  if (host.includes(":") && !host.startsWith("[") && !host.endsWith("]")) {
+    return `[${host}]`;
+  }
+  return host;
+}
+
+function normalizeAllowedHosts(hosts: string[], port: number): string[] {
+  const result = new Set<string>();
+  for (const raw of hosts) {
+    const value = raw.trim();
+    if (!value) continue;
+
+    // Already bracketed IPv6 literal
+    if (value.startsWith("[") && value.includes("]")) {
+      if (value.includes("]:")) {
+        result.add(value);
+      } else {
+        result.add(`${value}:${port}`);
+      }
+      continue;
+    }
+
+    const lastColon = value.lastIndexOf(":");
+    if (lastColon > 0) {
+      const maybePort = value.slice(lastColon + 1);
+      if (/^\d+$/.test(maybePort)) {
+        result.add(value);
+        continue;
+      }
+    }
+
+    if (value.includes(":")) {
+      // Bare IPv6 literal without brackets
+      result.add(`[${value}]:${port}`);
+    } else {
+      result.add(`${value}:${port}`);
+    }
+  }
+  return [...result];
+}
+
+function buildDefaultHostAllowlist(host: string, port: number): string[] {
+  const set = new Set<string>();
+  const addHost = (value: string) => {
+    if (value) {
+      set.add(value);
+    }
+  };
+  if (host && host !== "0.0.0.0" && host !== "::" && host !== "::0") {
+    addHost(`${host}:${port}`);
+  } else {
+    addHost(`127.0.0.1:${port}`);
+    addHost(`localhost:${port}`);
+    addHost(`[::1]:${port}`);
+  }
+  return [...set];
+}
+
+function buildDefaultCorsOrigins(host: string, port: number): string[] {
+  const set = new Set<string>();
+  const addOrigin = (scheme: string, hostname: string) => {
+    if (!hostname) return;
+    const formatted = formatHostForOrigin(hostname);
+    set.add(`${scheme}://${formatted}:${port}`);
+  };
+  if (host && host !== "0.0.0.0" && host !== "::" && host !== "::0") {
+    addOrigin("http", host);
+    addOrigin("https", host);
+  } else {
+    addOrigin("http", "127.0.0.1");
+    addOrigin("http", "localhost");
+  }
+  return [...set];
 }
 
 type OAuthRuntimeConfig = {
@@ -333,6 +556,11 @@ const CONNECTOR_DEFAULT_DAYS_BACK = parseEnvInt("MESSAGES_MCP_CONNECTOR_DAYS_BAC
 const CONNECTOR_DEFAULT_LIMIT = parseEnvInt("MESSAGES_MCP_CONNECTOR_SEARCH_LIMIT", 20, 1, 50);
 const CONNECTOR_BASE_URL = (process.env.MESSAGES_MCP_CONNECTOR_BASE_URL || "").trim().replace(/\/+$/, "");
 const HISTORY_BY_DAYS_MAX = parseEnvInt("MESSAGES_MCP_HISTORY_MAX_DAYS", 730, 1, 3650);
+const INBOX_RESOURCE_URI = "messages://inbox";
+const INBOX_RESOURCE_LIMIT = parseEnvInt("MESSAGES_MCP_INBOX_RESOURCE_LIMIT", 15, 5, 50);
+const CONVERSATION_RESOURCE_TEMPLATE_URI = "messages://conversation/{selector}/{value}";
+const CONVERSATION_RESOURCE_MESSAGE_LIMIT = parseEnvInt("MESSAGES_MCP_CONVERSATION_RESOURCE_LIMIT", 60, 10, 200);
+const CONVERSATION_RESOURCE_LIST_LIMIT = parseEnvInt("MESSAGES_MCP_CONVERSATION_LIST_LIMIT", 20, 5, 100);
 
 function toIsoUtc(unixMs: number | null): string | null {
   if (unixMs == null) return null;
@@ -503,6 +731,163 @@ const normalizedMessageSchema = z.object({
   metadata: z.record(z.string(), z.any()),
 });
 
+function extractParticipantsList(serialized: string | null | undefined): string[] {
+  if (!serialized) return [];
+  return Array.from(
+    new Set(
+      serialized
+        .split(",")
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0),
+    ),
+  );
+}
+
+type InboxConversationSummary = {
+  chat_id: number;
+  guid: string | null;
+  display_name: string | null;
+  participants: string[];
+  unread_count: number;
+  last_message_unix_ms: number | null;
+  last_message_iso: string | null;
+  latest_message: NormalizedMessage | null;
+};
+
+type InboxSnapshot = {
+  generated_at: string;
+  total_conversations: number;
+  total_unread: number;
+  conversations: InboxConversationSummary[];
+};
+
+async function buildInboxSnapshot(limit: number): Promise<InboxSnapshot> {
+  const chats = await listChats(limit);
+  const conversations = await Promise.all(
+    chats.map(async (chat) => {
+      const rows = await getMessagesByChatId(chat.chat_id, 1);
+      const normalized = normalizeMessages(rows.map((row) => ({ ...row, chat_id: chat.chat_id })));
+      const latest = normalized[0] ?? null;
+      const lastUnix = appleEpochToUnixMs(chat.last_message_date);
+      return {
+        chat_id: chat.chat_id,
+        guid: chat.guid ?? null,
+        display_name: chat.display_name ?? null,
+        participants: extractParticipantsList(chat.participants),
+        unread_count: Number(chat.unread_count ?? 0),
+        last_message_unix_ms: lastUnix,
+        last_message_iso: toIsoUtc(lastUnix),
+        latest_message: latest,
+      } satisfies InboxConversationSummary;
+    }),
+  );
+  const totalUnread = conversations.reduce((sum, entry) => sum + entry.unread_count, 0);
+  return {
+    generated_at: new Date().toISOString(),
+    total_conversations: conversations.length,
+    total_unread: totalUnread,
+    conversations,
+  };
+}
+
+type ConversationResourcePayload = {
+  generated_at: string;
+  selector: string;
+  value: string;
+  target: SendTargetDescriptor;
+  chat: {
+    chat_id: number;
+    guid: string | null;
+    display_name: string | null;
+    participants: string[];
+    unread_count: number;
+    last_message_unix_ms: number | null;
+    last_message_iso: string | null;
+  };
+  messages: NormalizedMessage[];
+};
+
+async function buildConversationResourcePayload(selector: string, rawValue: string): Promise<ConversationResourcePayload> {
+  const normalizedSelector = selector.trim().toLowerCase();
+  const decodedValue = decodeURIComponent(rawValue ?? "").trim();
+  if (!decodedValue) {
+    throw new Error("Conversation resource value must not be empty.");
+  }
+
+  let chatId: number | null = null;
+  let candidateGuid: string | null = null;
+  let candidateName: string | null = null;
+  let candidateRecipient: string | null = null;
+
+  switch (normalizedSelector) {
+    case "chat-id": {
+      const parsed = Number.parseInt(decodedValue, 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new Error(`Invalid chat-id value: ${decodedValue}`);
+      }
+      chatId = parsed;
+      break;
+    }
+    case "chat-guid": {
+      chatId = await getChatIdByGuid(decodedValue);
+      candidateGuid = decodedValue;
+      break;
+    }
+    case "chat-name": {
+      chatId = await getChatIdByDisplayName(decodedValue);
+      candidateName = decodedValue;
+      break;
+    }
+    case "participant": {
+      chatId = await getChatIdByParticipant(decodedValue);
+      candidateRecipient = decodedValue;
+      break;
+    }
+    default:
+      throw new Error(`Unsupported selector '${selector}'. Use chat-id, chat-guid, chat-name, or participant.`);
+  }
+
+  if (!chatId || !Number.isFinite(chatId) || chatId <= 0) {
+    throw new Error(`Unable to resolve chat for selector '${selector}' and value '${decodedValue}'.`);
+  }
+
+  const chatRow = await getChatById(chatId);
+  if (!chatRow) {
+    throw new Error(`Chat ${chatId} not found.`);
+  }
+
+  const descriptor = buildTargetDescriptor({
+    recipient: candidateRecipient ?? undefined,
+    chat_guid: chatRow.guid ?? candidateGuid ?? undefined,
+    chat_name: chatRow.display_name ?? candidateName ?? undefined,
+  });
+
+  const rows = await getMessagesByChatId(chatRow.chat_id, CONVERSATION_RESOURCE_MESSAGE_LIMIT);
+  const normalized = normalizeMessages(rows.map((row) => ({ ...row, chat_id: chatRow.chat_id }))).sort((a, b) => {
+    const aTime = typeof a.unix_ms === "number" ? a.unix_ms : 0;
+    const bTime = typeof b.unix_ms === "number" ? b.unix_ms : 0;
+    return aTime - bTime;
+  });
+
+  const lastUnix = appleEpochToUnixMs(chatRow.last_message_date);
+  return {
+    generated_at: new Date().toISOString(),
+    selector: normalizedSelector,
+    value: decodedValue,
+    target: descriptor,
+    chat: {
+      chat_id: chatRow.chat_id,
+      guid: chatRow.guid ?? null,
+      display_name: chatRow.display_name ?? null,
+      participants: extractParticipantsList(chatRow.participants),
+      unread_count: Number(chatRow.unread_count ?? 0),
+      last_message_unix_ms: lastUnix,
+      last_message_iso: toIsoUtc(lastUnix),
+    },
+    messages: normalized,
+  };
+}
+
 const searchResultSchema = normalizedMessageSchema.extend({
   chat_id: z.number(),
   snippet: z.string().nullable(),
@@ -661,6 +1046,37 @@ const SERVER_INSTRUCTIONS = [
   "Grant Full Disk Access to the invoking shell so chat.db can be read and attachments can be sent.",
 ].join("\n");
 
+const CONNECTOR_MANIFEST_VERSION = "2025-06-18";
+const CONNECTOR_DEFAULT_CONTACT = process.env.MESSAGES_MCP_CONNECTOR_CONTACT?.trim() || "support@genericservice.app";
+const CONNECTOR_DEFAULT_DOCS_URL =
+  process.env.MESSAGES_MCP_CONNECTOR_DOCS_URL?.trim() || "https://github.com/Baphomet480/messages-app-mcp";
+const CONNECTOR_DEFAULT_PRIVACY_URL =
+  process.env.MESSAGES_MCP_CONNECTOR_PRIVACY_URL?.trim() || `${CONNECTOR_DEFAULT_DOCS_URL}#privacy`;
+const CONNECTOR_DEFAULT_TOS_URL = process.env.MESSAGES_MCP_CONNECTOR_TOS_URL?.trim() || `${CONNECTOR_DEFAULT_DOCS_URL}#terms`;
+const CONNECTOR_MANIFEST_CAPABILITIES = {
+  tools: {
+    listChanged: true,
+  },
+} as const;
+const CONNECTOR_MANIFEST_TOOLS: Array<{ name: string; description: string }> = [
+  {
+    name: "search",
+    description: "Connector-compatible full-text search across Messages.app history.",
+  },
+  {
+    name: "fetch",
+    description: "Fetch an individual message and optional conversational context by id.",
+  },
+];
+
+type ToolResourceLink = {
+  type: "resource_link";
+  uri: string;
+  name: string;
+  description: string;
+  mimeType?: string;
+};
+
 function createConfiguredServer(): McpServer {
   const versionInfo = getVersionInfoSync();
   const server = new McpServer(
@@ -673,8 +1089,22 @@ function createConfiguredServer(): McpServer {
     },
     {
       instructions: SERVER_INSTRUCTIONS,
+      capabilities: {
+        logging: {},
+      },
     }
   );
+
+  const logToClients = (level: BasicLoggingLevel, args: unknown[]): void => {
+    broadcastLog(level, args, [server]);
+  };
+
+  const mcpLog = {
+    debug: (...args: unknown[]) => logToClients("debug", args),
+    info: (...args: unknown[]) => logToClients("info", args),
+    warn: (...args: unknown[]) => logToClients("warning", args),
+    error: (...args: unknown[]) => logToClients("error", args),
+  } as const;
 
   const sendTextInputSchema = {
     recipient: z.string().min(1).describe("Phone number in E.164 format or iMessage email.").optional(),
@@ -725,18 +1155,21 @@ function createConfiguredServer(): McpServer {
       .join("\n");
   }
 
-  // send_text tool
-  if (READ_ONLY_MODE) {
-    server.registerTool(
-      "send_text",
-      {
-        title: "Send Message",
-        description: "Send an SMS, RCS, or iMessage via Messages.app to a phone number, chat GUID, or named chat.",
-        inputSchema: sendTextInputSchema,
-        outputSchema: sendStandardOutputSchema.shape,
+  server.registerTool(
+    "send_text",
+    {
+      title: "Send Message",
+      description: "Send an SMS, RCS, or iMessage via Messages.app to a phone number, chat GUID, or named chat.",
+      inputSchema: sendTextInputSchema,
+      outputSchema: sendStandardOutputSchema.shape,
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: true,
       },
-      async ({ recipient, chat_guid, chat_name }) => {
-        const base = { recipient, chat_guid, chat_name };
+    },
+    async ({ recipient, chat_guid, chat_name, text }) => {
+      const base = { recipient, chat_guid, chat_name };
+      if (READ_ONLY_MODE) {
         if (!hasTarget(base)) {
           return {
             content: textContent("Missing target. Provide recipient, chat_guid, or chat_name."),
@@ -745,104 +1178,98 @@ function createConfiguredServer(): McpServer {
         }
         const targetDescriptor = buildTargetDescriptor(base);
         const failure = buildSendFailurePayload(targetDescriptor, "Read-only mode is enabled.");
-        logger.warn("send_text skipped in read-only mode", {
+        mcpLog.warn("send_text skipped in read-only mode", {
           target: targetDescriptor.display,
           recipient: maskRecipient(recipient ?? ""),
         });
         const std = toStandardSendOutput(failure);
         return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
       }
-    );
-  } else {
-    server.registerTool(
-      "send_text",
-      {
-        title: "Send Message",
-        description: "Send an SMS, RCS, or iMessage via Messages.app to a phone number, chat GUID, or named chat.",
-        inputSchema: sendTextInputSchema,
-        outputSchema: sendStandardOutputSchema.shape,
-      },
-      async ({ recipient, chat_guid, chat_name, text }) => {
-        const base = { recipient, chat_guid, chat_name };
-        const targetDescriptor = buildTargetDescriptor(base);
-        try {
-          const target = buildSendTarget(base);
-          await sendMessageAppleScript(target, text);
 
-          const { chatId, messages, lookupError } = await collectRecentMessages(base);
-          const payload = buildSendSuccessPayload<NormalizedMessage>({
-            target: targetDescriptor,
-            chatId,
-            messages,
-            lookupError,
-          });
-          const segmentInfo = estimateSegmentInfo(text);
-          const textLength = Array.from(text).length;
-          let payloadWarning: string | undefined;
-          if (SEGMENT_WARNING_THRESHOLD > 0 && segmentInfo.segments > SEGMENT_WARNING_THRESHOLD) {
-            const unitLabel = segmentInfo.encoding === "gsm-7" ? "GSM-7 units" : "code points";
-            payloadWarning = `Text spans ${segmentInfo.segments} segments (${segmentInfo.unitCount} ${unitLabel}); consider splitting to stay within ${SEGMENT_WARNING_THRESHOLD} segments for reliable delivery.`;
-          }
-          const std = toStandardSendOutput(payload, {
-            submittedText: text,
-            submittedLength: textLength,
-            segmentInfo,
-            payloadWarning,
-          });
-          logger.info("send_text success", {
-            target: targetDescriptor.display,
-            recipient: maskRecipient(recipient ?? ""),
-            chat_id: chatId ?? null,
-            message_preview: truncateForLog(text),
-            latest_message_id: payload.latest_message?.message_rowid ?? null,
-            lookup_error: lookupError ?? null,
-            submitted_segment_count: segmentInfo.segments,
-            submitted_segment_encoding: segmentInfo.encoding,
-            payload_warning: payloadWarning ?? null,
-          });
-          return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std };
-        } catch (e) {
-          const reason = cleanOsaError(e);
-          const failure = buildSendFailurePayload(targetDescriptor, reason);
-          const segmentInfo = estimateSegmentInfo(text);
-          const textLength = Array.from(text).length;
-          let payloadWarning: string | undefined;
-          if (SEGMENT_WARNING_THRESHOLD > 0 && segmentInfo.segments > SEGMENT_WARNING_THRESHOLD) {
-            const unitLabel = segmentInfo.encoding === "gsm-7" ? "GSM-7 units" : "code points";
-            payloadWarning = `Text spans ${segmentInfo.segments} segments (${segmentInfo.unitCount} ${unitLabel}); consider splitting to stay within ${SEGMENT_WARNING_THRESHOLD} segments for reliable delivery.`;
-          }
-          const std = toStandardSendOutput(failure, {
-            submittedText: text,
-            submittedLength: textLength,
-            segmentInfo,
-            payloadWarning,
-          });
-          logger.error("send_text failed", {
-            target: targetDescriptor.display,
-            recipient: maskRecipient(recipient ?? ""),
-            error: reason,
-            message_preview: truncateForLog(text),
-            submitted_segment_count: segmentInfo.segments,
-            submitted_segment_encoding: segmentInfo.encoding,
-            payload_warning: payloadWarning ?? null,
-          });
-          return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
+      const targetDescriptor = buildTargetDescriptor(base);
+      try {
+        const target = buildSendTarget(base);
+        await sendMessageAppleScript(target, text);
+
+        const { chatId, messages, lookupError } = await collectRecentMessages(base);
+        const payload = buildSendSuccessPayload<NormalizedMessage>({
+          target: targetDescriptor,
+          chatId,
+          messages,
+          lookupError,
+        });
+        const segmentInfo = estimateSegmentInfo(text);
+        const textLength = Array.from(text).length;
+        let payloadWarning: string | undefined;
+        if (SEGMENT_WARNING_THRESHOLD > 0 && segmentInfo.segments > SEGMENT_WARNING_THRESHOLD) {
+          const unitLabel = segmentInfo.encoding === "gsm-7" ? "GSM-7 units" : "code points";
+          payloadWarning = `Text spans ${segmentInfo.segments} segments (${segmentInfo.unitCount} ${unitLabel}); consider splitting to stay within ${SEGMENT_WARNING_THRESHOLD} segments for reliable delivery.`;
         }
+        const std = toStandardSendOutput(payload, {
+          submittedText: text,
+          submittedLength: textLength,
+          segmentInfo,
+          payloadWarning,
+        });
+        mcpLog.info("send_text success", {
+          target: targetDescriptor.display,
+          recipient: maskRecipient(recipient ?? ""),
+          chat_id: chatId ?? null,
+          message_preview: truncateForLog(text),
+          latest_message_id: payload.latest_message?.message_rowid ?? null,
+          lookup_error: lookupError ?? null,
+          submitted_segment_count: segmentInfo.segments,
+          submitted_segment_encoding: segmentInfo.encoding,
+          payload_warning: payloadWarning ?? null,
+        });
+        return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std };
+      } catch (e) {
+        const reason = cleanOsaError(e);
+        const failure = buildSendFailurePayload(targetDescriptor, reason);
+        const segmentInfo = estimateSegmentInfo(text);
+        const textLength = Array.from(text).length;
+        let payloadWarning: string | undefined;
+        if (SEGMENT_WARNING_THRESHOLD > 0 && segmentInfo.segments > SEGMENT_WARNING_THRESHOLD) {
+          const unitLabel = segmentInfo.encoding === "gsm-7" ? "GSM-7 units" : "code points";
+          payloadWarning = `Text spans ${segmentInfo.segments} segments (${segmentInfo.unitCount} ${unitLabel}); consider splitting to stay within ${SEGMENT_WARNING_THRESHOLD} segments for reliable delivery.`;
+        }
+        const std = toStandardSendOutput(failure, {
+          submittedText: text,
+          submittedLength: textLength,
+          segmentInfo,
+          payloadWarning,
+        });
+        mcpLog.error("send_text failed", {
+          target: targetDescriptor.display,
+          recipient: maskRecipient(recipient ?? ""),
+          error: reason,
+          message_preview: truncateForLog(text),
+          submitted_segment_count: segmentInfo.segments,
+          submitted_segment_encoding: segmentInfo.encoding,
+          payload_warning: payloadWarning ?? null,
+        });
+        return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
       }
-    );
-  }
+    }
+  );
 
-  if (READ_ONLY_MODE) {
-    server.registerTool(
-      "send_attachment",
-      {
-        title: "Send Attachment",
-        description: "Send an attachment over SMS, RCS, or iMessage via Messages.app to a recipient or existing chat.",
-        inputSchema: sendAttachmentInputSchema,
-        outputSchema: sendStandardOutputSchema.shape,
+  server.registerTool(
+    "send_attachment",
+    {
+      title: "Send Attachment",
+      description: "Send an attachment via Messages.app to a recipient or existing chat.",
+      inputSchema: sendAttachmentInputSchema,
+      outputSchema: sendStandardOutputSchema.shape,
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: true,
       },
-      async ({ recipient, chat_guid, chat_name }) => {
-        const base = { recipient, chat_guid, chat_name };
+    },
+    async ({ recipient, chat_guid, chat_name, file_path, caption }) => {
+      const base = { recipient, chat_guid, chat_name };
+      const trimmedPath = file_path?.trim?.() ?? file_path;
+
+      if (READ_ONLY_MODE) {
         if (!hasTarget(base)) {
           return {
             content: textContent("Missing target. Provide recipient, chat_guid, or chat_name."),
@@ -851,81 +1278,68 @@ function createConfiguredServer(): McpServer {
         }
         const targetDescriptor = buildTargetDescriptor(base);
         const failure = buildSendFailurePayload(targetDescriptor, "Read-only mode is enabled.");
-        logger.warn("send_attachment skipped in read-only mode", {
+        mcpLog.warn("send_attachment skipped in read-only mode", {
           target: targetDescriptor.display,
           recipient: maskRecipient(recipient ?? ""),
         });
         const std = toStandardSendOutput(failure);
         return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
       }
-    );
-  } else {
-    server.registerTool(
-      "send_attachment",
-      {
-        title: "Send Attachment",
-        description: "Send an attachment via Messages.app to a recipient or existing chat.",
-        inputSchema: sendAttachmentInputSchema,
-        outputSchema: sendStandardOutputSchema.shape,
-      },
-      async ({ recipient, chat_guid, chat_name, file_path, caption }) => {
-        const base = { recipient, chat_guid, chat_name };
-        const trimmedPath = file_path?.trim?.() ?? file_path;
-        try {
-          const target = buildSendTarget(base);
-          await sendAttachmentAppleScript(target, trimmedPath, caption);
-          const targetDescriptor = buildTargetDescriptor(base);
 
-          const fileLabel = trimmedPath ? basename(trimmedPath) : null;
-          const labelSegment = fileLabel ? `"${fileLabel}" ` : "";
-          const summary = `Sent attachment ${labelSegment}to ${targetDescriptor.display}.`.trim();
+      try {
+        const target = buildSendTarget(base);
+        await sendAttachmentAppleScript(target, trimmedPath, caption);
+        const targetDescriptor = buildTargetDescriptor(base);
 
-          const { chatId, messages, lookupError } = await collectRecentMessages(base);
-          const basePayload = buildSendSuccessPayload<NormalizedMessage>({
-            target: targetDescriptor,
-            chatId,
-            messages,
-            lookupError,
-            summary,
-          });
-          const std = toStandardSendOutput(basePayload, {
-            attachment: {
-              file_path: trimmedPath ?? null,
-              file_label: fileLabel,
-              caption: caption?.trim?.() ?? null,
-            },
-          });
-          logger.info("send_attachment success", {
-            target: targetDescriptor.display,
-            recipient: maskRecipient(recipient ?? ""),
-            chat_id: chatId ?? null,
-            file_label: fileLabel,
-            caption_preview: truncateForLog(caption),
-            latest_message_id: basePayload.latest_message?.message_rowid ?? null,
-            lookup_error: lookupError ?? null,
-          });
-          return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std };
-        } catch (e) {
-          const targetDescriptor = buildTargetDescriptor(base);
-          const reason =
-            e instanceof Error && e.message === MESSAGES_FDA_HINT
-              ? e.message
-              : cleanOsaError(e);
-          const summary = `Failed to send attachment to ${targetDescriptor.display}. ${reason}`.trim();
-          const failure = buildSendFailurePayload(targetDescriptor, reason, { summary });
-          const std = toStandardSendOutput(failure);
-          logger.error("send_attachment failed", {
-            target: targetDescriptor.display,
-            recipient: maskRecipient(recipient ?? ""),
-            error: reason,
+        const fileLabel = trimmedPath ? basename(trimmedPath) : null;
+        const labelSegment = fileLabel ? `"${fileLabel}" ` : "";
+        const summary = `Sent attachment ${labelSegment}to ${targetDescriptor.display}.`.trim();
+
+        const { chatId, messages, lookupError } = await collectRecentMessages(base);
+        const basePayload = buildSendSuccessPayload<NormalizedMessage>({
+          target: targetDescriptor,
+          chatId,
+          messages,
+          lookupError,
+          summary,
+        });
+        const std = toStandardSendOutput(basePayload, {
+          attachment: {
             file_path: trimmedPath ?? null,
-            caption_preview: truncateForLog(caption),
-          });
-          return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
-        }
+            file_label: fileLabel,
+            caption: caption?.trim?.() ?? null,
+          },
+        });
+        mcpLog.info("send_attachment success", {
+          target: targetDescriptor.display,
+          recipient: maskRecipient(recipient ?? ""),
+          chat_id: chatId ?? null,
+          file_label: fileLabel,
+          caption_preview: truncateForLog(caption),
+          latest_message_id: basePayload.latest_message?.message_rowid ?? null,
+          lookup_error: lookupError ?? null,
+        });
+        return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std };
+      } catch (e) {
+        const targetDescriptor = buildTargetDescriptor(base);
+        const reason =
+          e instanceof Error && e.message === MESSAGES_FDA_HINT
+            ? e.message
+            : cleanOsaError(e);
+        const summary = `Failed to send attachment to ${targetDescriptor.display}. ${reason}`.trim();
+        const failure = buildSendFailurePayload(targetDescriptor, reason, { summary });
+        const std = toStandardSendOutput(failure);
+        mcpLog.error("send_attachment failed", {
+          target: targetDescriptor.display,
+          recipient: maskRecipient(recipient ?? ""),
+          error: reason,
+          file_path: trimmedPath ?? null,
+          caption_preview: truncateForLog(caption),
+        });
+        return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
       }
-    );
-  }
+    }
+  );
 
   server.registerTool(
     "applescript_handler_template",
@@ -934,6 +1348,10 @@ function createConfiguredServer(): McpServer {
       description: "Return a starter AppleScript for Messages event handlers (message received/sent, file transfer).",
       inputSchema: { minimal: z.boolean().optional().describe("Set true to omit inline comments.") },
       outputSchema: { script: z.string() },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ minimal }) => {
       const script = renderHandlerTemplate(Boolean(minimal));
@@ -963,7 +1381,11 @@ function createConfiguredServer(): McpServer {
         package_version: z.string(),
         git_commit: z.string().nullable(),
         git_commit_short: z.string().nullable(),
-      }
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async () => {
       const report = await runDoctor();
@@ -993,6 +1415,10 @@ function createConfiguredServer(): McpServer {
           node_version: z.string(),
           platform: z.string(),
         }),
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
       },
     },
     async () => {
@@ -1040,6 +1466,10 @@ function createConfiguredServer(): McpServer {
           })
         ),
         requirements: z.array(z.string()),
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
       },
     },
     async () => {
@@ -1126,17 +1556,23 @@ function createConfiguredServer(): McpServer {
           .describe("When true, restrict results to chats with unread messages."),
       },
       outputSchema: {
-        chats: z.array(z.object({
-          chat_id: z.number(),
-          guid: z.string(),
-          display_name: z.string().nullable(),
-          participants: z.array(z.string()),
-          last_message_unix_ms: z.number().nullable(),
-          last_message_iso_utc: z.string().nullable(),
-          last_message_iso_local: z.string().nullable(),
-          unread_count: z.number().nullable(),
-        }))
-      }
+        chats: z.array(
+          z.object({
+            chat_id: z.number(),
+            guid: z.string(),
+            display_name: z.string().nullable(),
+            participants: z.array(z.string()),
+            last_message_unix_ms: z.number().nullable(),
+            last_message_iso_utc: z.string().nullable(),
+            last_message_iso_local: z.string().nullable(),
+            unread_count: z.number().nullable(),
+          })
+        ),
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ limit, participant, updated_after_unix_ms, unread_only }) => {
       try {
@@ -1219,24 +1655,41 @@ function createConfiguredServer(): McpServer {
       },
       outputSchema: {
         messages: z.array(normalizedMessageSchema),
-        context: z.object({
-          anchor_rowid: z.number(),
-          before: z.number(),
-          after: z.number(),
-          include_attachments_meta: z.boolean(),
-          messages: z.array(normalizedMessageSchema),
-        }).optional(),
-      }
+        context: z
+          .object({
+            anchor_rowid: z.number(),
+            before: z.number(),
+            after: z.number(),
+            include_attachments_meta: z.boolean(),
+            messages: z.array(normalizedMessageSchema),
+          })
+          .optional(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
-    async ({ chat_id, participant, limit, context_anchor_rowid, context_before, context_after, context_include_attachments_meta }) => {
+    async ({
+      chat_id,
+      participant,
+      limit,
+      context_anchor_rowid,
+      context_before,
+      context_after,
+      context_include_attachments_meta,
+    }) => {
       if (chat_id == null && !participant) {
         return { content: textContent("Provide either chat_id or participant."), isError: true };
       }
       try {
-        const rows = chat_id != null
-          ? await getMessagesByChatId(chat_id, limit)
-          : await getMessagesByParticipant(participant!, limit);
-        const mapped = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
+        const rows =
+          chat_id != null
+            ? await getMessagesByChatId(chat_id, limit)
+            : await getMessagesByParticipant(participant!, limit);
+        const mapped = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort(
+          (a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0),
+        );
         const summaryParts: string[] = [];
         if (chat_id != null) summaryParts.push(`chat_id=${chat_id}`);
         if (participant) summaryParts.push(`participant=${participant}`);
@@ -1254,8 +1707,15 @@ function createConfiguredServer(): McpServer {
           };
         } = { summary, messages: mapped };
         if (context_anchor_rowid != null) {
-          const ctxRows = await contextAroundMessage(context_anchor_rowid, context_before, context_after, !!context_include_attachments_meta);
-          const ctxMessages = normalizeMessages(ctxRows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
+          const ctxRows = await contextAroundMessage(
+            context_anchor_rowid,
+            context_before,
+            context_after,
+            !!context_include_attachments_meta,
+          );
+          const ctxMessages = normalizeMessages(ctxRows as Array<EnrichedMessageRow & { chat_id?: number }>).sort(
+            (a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0),
+          );
           structuredContent.context = {
             anchor_rowid: context_anchor_rowid,
             before: context_before,
@@ -1299,8 +1759,12 @@ function createConfiguredServer(): McpServer {
           .describe("Include attachment metadata in the response."),
       },
       outputSchema: {
-        messages: z.array(normalizedMessageSchema)
-      }
+        messages: z.array(normalizedMessageSchema),
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ participant, limit, include_attachments_meta }) => {
       try {
@@ -1308,7 +1772,7 @@ function createConfiguredServer(): McpServer {
           includeAttachmentsMeta: !!include_attachments_meta,
         });
         const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>);
-        logger.info("recent_messages_by_participant", {
+        mcpLog.info("recent_messages_by_participant", {
           participant,
           masked_participant: maskRecipient(participant),
           limit,
@@ -1321,7 +1785,7 @@ function createConfiguredServer(): McpServer {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const msg = `Failed to retrieve messages for participant. Error: ${message}`;
-        logger.error("recent_messages_by_participant failed", {
+        mcpLog.error("recent_messages_by_participant failed", {
           participant,
           masked_participant: maskRecipient(participant),
           error: message,
@@ -1347,11 +1811,15 @@ function createConfiguredServer(): McpServer {
           })
         ),
       },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async () => {
       try {
         const accounts = await listMessagesAccounts();
-        logger.info("list_accounts", { account_count: accounts.length, services: accounts.map((a) => a.service_type) });
+        mcpLog.info("list_accounts", { account_count: accounts.length, services: accounts.map((a) => a.service_type) });
         const payload = { accounts } satisfies { accounts: MessagesAccountInfo[] };
         return {
           content: textContent(JSON.stringify(payload, null, 2)),
@@ -1359,7 +1827,7 @@ function createConfiguredServer(): McpServer {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("list_accounts_failed", { error: message });
+        mcpLog.error("list_accounts_failed", { error: message });
         return { content: textContent(`Failed to list Messages accounts. Error: ${message}`), isError: true };
       }
     }
@@ -1371,8 +1839,17 @@ function createConfiguredServer(): McpServer {
       title: "List Participants",
       description: "List known participants from Messages with optional substring filtering.",
       inputSchema: {
-        filter: z.string().optional().describe("Case-insensitive substring matched against handle and contact names."),
-        limit: z.number().int().min(1).max(1000).optional().describe("Maximum participants to return (defaults to 250)."),
+        filter: z
+          .string()
+          .optional()
+          .describe("Case-insensitive substring matched against handle and contact names."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(1000)
+          .optional()
+          .describe("Maximum participants to return (defaults to 250)."),
       },
       outputSchema: {
         participants: z.array(
@@ -1387,12 +1864,17 @@ function createConfiguredServer(): McpServer {
           })
         ),
       },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ filter, limit }) => {
       try {
         const participants = await listMessagesParticipants(filter);
-        const trimmed = typeof limit === "number" && limit > 0 ? participants.slice(0, limit) : participants.slice(0, 250);
-        logger.info("list_participants", {
+        const trimmed =
+          typeof limit === "number" && limit > 0 ? participants.slice(0, limit) : participants.slice(0, 250);
+        mcpLog.info("list_participants", {
           filter: filter ?? null,
           limit: limit ?? null,
           total_count: participants.length,
@@ -1405,7 +1887,7 @@ function createConfiguredServer(): McpServer {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("list_participants_failed", { error: message, filter: filter ?? null });
+        mcpLog.error("list_participants_failed", { error: message, filter: filter ?? null });
         return { content: textContent(`Failed to list Messages participants. Error: ${message}`), isError: true };
       }
     }
@@ -1420,17 +1902,25 @@ function createConfiguredServer(): McpServer {
         ok: z.boolean(),
         message: z.string(),
       },
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: true,
+      },
     },
     async () => {
       try {
         await loginMessagesAccounts();
         const message = "Login command sent to Messages.";
-        logger.info("login_accounts_success");
+        mcpLog.info("login_accounts_success");
         return { content: textContent(message), structuredContent: { ok: true, message } };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("login_accounts_failed", { error: message });
-        return { content: textContent(`Failed to log in Messages accounts. Error: ${message}`), structuredContent: { ok: false, message }, isError: true };
+        mcpLog.error("login_accounts_failed", { error: message });
+        return {
+          content: textContent(`Failed to log in Messages accounts. Error: ${message}`),
+          structuredContent: { ok: false, message },
+          isError: true,
+        };
       }
     }
   );
@@ -1444,17 +1934,25 @@ function createConfiguredServer(): McpServer {
         ok: z.boolean(),
         message: z.string(),
       },
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: true,
+      },
     },
     async () => {
       try {
         await logoutMessagesAccounts();
         const message = "Logout command sent to Messages.";
-        logger.info("logout_accounts_success");
+        mcpLog.info("logout_accounts_success");
         return { content: textContent(message), structuredContent: { ok: true, message } };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("logout_accounts_failed", { error: message });
-        return { content: textContent(`Failed to log out Messages accounts. Error: ${message}`), structuredContent: { ok: false, message }, isError: true };
+        mcpLog.error("logout_accounts_failed", { error: message });
+        return {
+          content: textContent(`Failed to log out Messages accounts. Error: ${message}`),
+          structuredContent: { ok: false, message },
+          isError: true,
+        };
       }
     }
   );
@@ -1465,8 +1963,17 @@ function createConfiguredServer(): McpServer {
       title: "List File Transfers",
       description: "List file transfers that Messages is currently processing.",
       inputSchema: {
-        include_finished: z.boolean().optional().describe("Include completed transfers (defaults to false)."),
-        limit: z.number().int().min(1).max(500).optional().describe("Maximum number of transfers to return."),
+        include_finished: z
+          .boolean()
+          .optional()
+          .describe("Include completed transfers (defaults to false)."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe("Maximum number of transfers to return."),
       },
       outputSchema: {
         transfers: z.array(
@@ -1487,11 +1994,15 @@ function createConfiguredServer(): McpServer {
           })
         ),
       },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ include_finished, limit }) => {
       try {
         const transfers = await listMessagesFileTransfers({ includeFinished: include_finished, limit: limit ?? 0 });
-        logger.info("list_file_transfers", {
+        mcpLog.info("list_file_transfers", {
           transfer_count: transfers.length,
           include_finished: !!include_finished,
           limit: limit ?? null,
@@ -1504,7 +2015,11 @@ function createConfiguredServer(): McpServer {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("list_file_transfers_failed", { error: message, include_finished: !!include_finished, limit: limit ?? null });
+        mcpLog.error("list_file_transfers_failed", {
+          error: message,
+          include_finished: !!include_finished,
+          limit: limit ?? null,
+        });
         return { content: textContent(`Failed to list Messages file transfers. Error: ${message}`), isError: true };
       }
     }
@@ -1537,11 +2052,15 @@ function createConfiguredServer(): McpServer {
           error: z.string(),
         }),
       },
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: true,
+      },
     },
     async ({ id }) => {
       try {
         const acceptance = await acceptMessagesFileTransfer(id);
-        logger.info("accept_file_transfer", {
+        mcpLog.info("accept_file_transfer", {
           id,
           accepted: acceptance.accepted,
           transfer_status: acceptance.transfer_status,
@@ -1557,7 +2076,7 @@ function createConfiguredServer(): McpServer {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("accept_file_transfer_failed", { id, error: message });
+        mcpLog.error("accept_file_transfer_failed", { id, error: message });
         return { content: textContent(`Failed to accept file transfer ${id}. Error: ${message}`), isError: true };
       }
     }
@@ -1568,7 +2087,8 @@ function createConfiguredServer(): McpServer {
     "search_messages",
     {
       title: "Search Messages (Scoped)",
-      description: "Search or filter conversation history by text with optional chat/participant scope and explicit time bounds.",
+      description:
+        "Search or filter conversation history by text with optional chat/participant scope and explicit time bounds.",
       inputSchema: {
         query: z
           .string()
@@ -1620,17 +2140,23 @@ function createConfiguredServer(): McpServer {
           .describe("Include attachment metadata in results when true."),
       },
       outputSchema: {
-        results: z.array(searchResultSchema)
-      }
+        results: z.array(searchResultSchema),
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async (input) => {
       if (input.chat_id == null && !input.participant && input.from_unix_ms == null && input.to_unix_ms == null) {
-        logger.warn("search_messages rejected", {
+        mcpLog.warn("search_messages rejected", {
           query: input.query,
           reason: "missing_scope_filters",
         });
         return {
-          content: textContent("Provide chat_id, participant, or from/to unix filters when searching to avoid full-database scans."),
+          content: textContent(
+            "Provide chat_id, participant, or from/to unix filters when searching to avoid full-database scans.",
+          ),
           isError: true,
         };
       }
@@ -1665,7 +2191,7 @@ function createConfiguredServer(): McpServer {
           const chatId = msg.chat_id ?? chatLookup.get(msg.message_rowid) ?? 0;
           return { ...msg, chat_id: chatId, snippet };
         });
-        logger.info("search_messages", {
+        mcpLog.info("search_messages", {
           query: input.query,
           chat_id: input.chat_id ?? null,
           participant: input.participant ?? null,
@@ -1682,17 +2208,19 @@ function createConfiguredServer(): McpServer {
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         if (/scope filter/i.test(message) || /requires at least one scope/i.test(message)) {
-          logger.warn("search_messages rejected", {
+          mcpLog.warn("search_messages rejected", {
             query: input.query,
             reason: message,
           });
           return {
-            content: textContent("Provide chat_id, participant, or from/to unix filters when searching to avoid full-database scans."),
+            content: textContent(
+              "Provide chat_id, participant, or from/to unix filters when searching to avoid full-database scans.",
+            ),
             isError: true,
           };
         }
         const msg = `Failed to search messages. Verify Full Disk Access and try narrowing your filters. Error: ${message}`;
-        logger.error("search_messages failed", {
+        mcpLog.error("search_messages failed", {
           query: input.query,
           chat_id: input.chat_id ?? null,
           participant: input.participant ?? null,
@@ -1702,14 +2230,15 @@ function createConfiguredServer(): McpServer {
         });
         return { content: textContent(msg), isError: true };
       }
-  }
+    }
   );
 
   server.registerTool(
     "history_by_days",
     {
       title: "History By Days",
-      description: "Fetch recent messages from a chat or participant over a fixed number of days without providing a text query.",
+      description:
+        "Fetch recent messages from a chat or participant over a fixed number of days without providing a text query.",
       inputSchema: {
         chat_id: z
           .number()
@@ -1743,6 +2272,10 @@ function createConfiguredServer(): McpServer {
         summary: z.string(),
         results: z.array(normalizedMessageSchema),
       },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ chat_id, participant, days_back, limit, include_attachments_meta }) => {
       if (chat_id == null && !participant) {
@@ -1763,16 +2296,14 @@ function createConfiguredServer(): McpServer {
           limit: effectiveLimit,
           includeAttachmentsMeta: !!include_attachments_meta,
         });
-        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
-        const summaryParts = [
-          `${normalized.length} messages`,
-          `days_back=${effectiveDays}`,
-          `limit=${effectiveLimit}`,
-        ];
+        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id: number }>).sort(
+          (a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0),
+        );
+        const summaryParts = [`${normalized.length} messages`, `days_back=${effectiveDays}`, `limit=${effectiveLimit}`];
         if (chat_id != null) summaryParts.push(`chat_id=${chat_id}`);
         if (participant) summaryParts.push(`participant=${participant}`);
         const summary = summaryParts.join(" | ");
-        logger.info("history_by_days", {
+        mcpLog.info("history_by_days", {
           chat_id: chat_id ?? null,
           participant: participant ?? null,
           days_back: effectiveDays,
@@ -1789,7 +2320,7 @@ function createConfiguredServer(): McpServer {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("history_by_days_failed", {
+        mcpLog.error("history_by_days_failed", {
           chat_id: chat_id ?? null,
           participant: participant ?? null,
           days_back: effectiveDays,
@@ -1813,42 +2344,111 @@ function createConfiguredServer(): McpServer {
         query: z.string().min(1).describe("Search query string."),
         chat_guid: z.string().min(1).optional().describe("Optional chat GUID to scope results."),
         participant: z.string().optional().describe("Optional handle (phone or email) to scope results."),
-        days_back: z.number().int().min(1).max(365).optional().describe("How many days of history to include (default from env)."),
-        limit: z.number().int().min(1).max(50).optional().describe("Maximum number of documents to return."),
+        days_back: z
+          .number()
+          .int()
+          .min(1)
+          .max(365)
+          .optional()
+          .describe("How many days of history to include (default from env)."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .describe("Maximum number of documents to return."),
       },
       outputSchema: {
-        results: z.array(z.object({
-          id: z.string(),
-          title: z.string(),
-          url: z.string().optional(),
-          snippet: z.string(),
-          metadata: z.object({
-            chat_id: z.number().nullable(),
-            from_me: z.boolean(),
-            sender: z.string().nullable(),
-            iso_utc: z.string().nullable(),
-            iso_local: z.string().nullable(),
-          }),
-        })),
+        results: z.array(
+          z.object({
+            id: z.string(),
+            title: z.string(),
+            url: z.string().optional(),
+            snippet: z.string(),
+            metadata: z.object({
+              chat_id: z.number().nullable(),
+              from_me: z.boolean(),
+              sender: z.string().nullable(),
+              iso_utc: z.string().nullable(),
+              iso_local: z.string().nullable(),
+            }),
+          })
+        ),
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
       },
     },
     async ({ query, chat_guid, participant, days_back, limit }) => {
       const trimmedQuery = query.trim();
       if (!trimmedQuery) {
-        const payload = { results: [] };
+        const payload = { results: [] } as const;
         return {
           content: textContent(JSON.stringify(payload)),
           structuredContent: payload,
         };
       }
-      const effectiveDays = clampNumber(days_back ?? CONNECTOR_DEFAULT_DAYS_BACK, 1, 365);
-      const resultLimit = clampNumber(limit ?? CONNECTOR_DEFAULT_LIMIT, 1, 50);
+
+      let refinedQuery = trimmedQuery;
+      let resolvedParticipant = participant;
+      let resolvedChatGuid = chat_guid;
+      let resolvedDaysBack = days_back;
+      let resolvedLimit = limit;
+      let aiAssisted = false;
+
+      try {
+        const refinement = await refineSearchIntent(trimmedQuery, {
+          defaultDays: days_back ?? CONNECTOR_DEFAULT_DAYS_BACK,
+          defaultLimit: limit ?? CONNECTOR_DEFAULT_LIMIT,
+        });
+        if (refinement) {
+          const updatedQuery = refinement.query?.trim();
+          if (updatedQuery && updatedQuery.length > 0 && updatedQuery !== refinedQuery) {
+            refinedQuery = updatedQuery;
+            aiAssisted = true;
+          }
+          const participantProvided = typeof participant === "string" && participant.trim().length > 0;
+          if (!participantProvided) {
+            const aiParticipant = refinement.participant?.trim();
+            if (aiParticipant && aiParticipant.length > 0) {
+              resolvedParticipant = aiParticipant;
+              aiAssisted = true;
+            }
+          }
+          const chatGuidProvided = typeof chat_guid === "string" && chat_guid.trim().length > 0;
+          if (!chatGuidProvided) {
+            const aiChatGuid = refinement.chat_guid?.trim();
+            if (aiChatGuid && aiChatGuid.length > 0) {
+              resolvedChatGuid = aiChatGuid;
+              aiAssisted = true;
+            }
+          }
+          if (resolvedDaysBack == null && refinement.days_back != null) {
+            resolvedDaysBack = refinement.days_back;
+            aiAssisted = true;
+          }
+          if (resolvedLimit == null && refinement.limit != null) {
+            resolvedLimit = refinement.limit;
+            aiAssisted = true;
+          }
+        }
+      } catch (error) {
+        mcpLog.debug("AI search refinement failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      const effectiveDays = clampNumber(resolvedDaysBack ?? CONNECTOR_DEFAULT_DAYS_BACK, 1, 365);
+      const resultLimit = clampNumber(resolvedLimit ?? CONNECTOR_DEFAULT_LIMIT, 1, 50);
       const fromUnixMs = Date.now() - effectiveDays * 86400000;
+
       let chatId: number | undefined;
-      if (chat_guid) {
-        const resolvedChatId = await getChatIdByGuid(chat_guid);
+      if (resolvedChatGuid) {
+        const resolvedChatId = await getChatIdByGuid(resolvedChatGuid);
         if (resolvedChatId == null) {
-          const payload = { results: [] };
+          const payload = { results: [] } as const;
           return {
             content: textContent(JSON.stringify(payload)),
             structuredContent: payload,
@@ -1856,11 +2456,12 @@ function createConfiguredServer(): McpServer {
         }
         chatId = resolvedChatId;
       }
+
       try {
         const rows = await searchMessages({
-          query: trimmedQuery,
+          query: refinedQuery,
           chatId: chatId ?? undefined,
-          participant: participant ?? undefined,
+          participant: resolvedParticipant ?? undefined,
           fromUnixMs,
           limit: resultLimit,
           includeAttachmentsMeta: true,
@@ -1870,7 +2471,7 @@ function createConfiguredServer(): McpServer {
         for (const row of rows as Array<EnrichedMessageRow & { chat_id: number }>) {
           chatLookup.set(row.message_rowid, row.chat_id);
         }
-        const lowerQuery = trimmedQuery.toLowerCase();
+        const lowerQuery = refinedQuery.toLowerCase();
         const results = normalized.map((msg) => {
           const text = msg.text ?? "";
           const idx = text.toLowerCase().indexOf(lowerQuery);
@@ -1890,9 +2491,9 @@ function createConfiguredServer(): McpServer {
           } else {
             snippet = "(no text)";
           }
-          const counterpart = msg.from_me ? "Me" : (msg.sender ? displayRecipient(msg.sender) : "Unknown sender");
+          const counterpart = msg.from_me ? "Me" : msg.sender ? displayRecipient(msg.sender) : "Unknown sender";
           const timestamp = msg.iso_local ?? msg.iso_utc ?? null;
-          const titleParts = [] as string[];
+          const titleParts: string[] = [];
           if (counterpart) titleParts.push(counterpart);
           if (timestamp) titleParts.push(timestamp);
           if (!titleParts.length && snippet) {
@@ -1917,13 +2518,14 @@ function createConfiguredServer(): McpServer {
           };
         });
         const payload = { results };
-        logger.info("search tool", {
-          query: trimmedQuery,
-          chat_guid: chat_guid ?? null,
-          participant: participant ?? null,
+        mcpLog.info("search tool", {
+          query: refinedQuery,
+          chat_guid: resolvedChatGuid ?? null,
+          participant: resolvedParticipant ?? null,
           days_back: effectiveDays,
           limit: resultLimit,
           result_count: results.length,
+          ai_assisted: aiAssisted,
         });
         return {
           content: textContent(JSON.stringify(payload)),
@@ -1931,15 +2533,16 @@ function createConfiguredServer(): McpServer {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const structuredPayload = { results: [] };
+        const structuredPayload = { results: [] } as const;
         const contentPayload = { ...structuredPayload, error: message };
-        logger.error("search tool failed", {
-          query: trimmedQuery,
-          chat_guid: chat_guid ?? null,
-          participant: participant ?? null,
+        mcpLog.error("search tool failed", {
+          query: refinedQuery,
+          chat_guid: resolvedChatGuid ?? null,
+          participant: resolvedParticipant ?? null,
           days_back: effectiveDays,
           limit: resultLimit,
           error: message,
+          ai_assisted: aiAssisted,
         });
         return {
           content: textContent(JSON.stringify(contentPayload)),
@@ -1957,8 +2560,22 @@ function createConfiguredServer(): McpServer {
       description: "Return full message content and optional context for MCP connectors.",
       inputSchema: {
         id: z.string().min(1).describe("Identifier from search results (e.g., message:12345)."),
-        context_before: z.number().int().min(0).max(50).default(5).optional().describe("How many messages before to include in text."),
-        context_after: z.number().int().min(0).max(50).default(5).optional().describe("How many messages after to include in text."),
+        context_before: z
+          .number()
+          .int()
+          .min(0)
+          .max(50)
+          .default(5)
+          .optional()
+          .describe("How many messages before to include in text."),
+        context_after: z
+          .number()
+          .int()
+          .min(0)
+          .max(50)
+          .default(5)
+          .optional()
+          .describe("How many messages after to include in text."),
       },
       outputSchema: {
         id: z.string(),
@@ -1975,6 +2592,10 @@ function createConfiguredServer(): McpServer {
           context_before: z.number(),
           context_after: z.number(),
         }),
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
       },
     },
     async ({ id, context_before, context_after }) => {
@@ -2033,6 +2654,29 @@ function createConfiguredServer(): McpServer {
           isError: true,
         };
       }
+      const resourceLinks: ToolResourceLink[] =
+        anchor.attachment_hints
+          ?.map((hint, index) => {
+            if (!hint.resolved_path) {
+              return null;
+            }
+            const resolved = hint.resolved_path.startsWith("file://")
+              ? hint.resolved_path
+              : `file://${hint.resolved_path}`;
+            const fileLabel = hint.filename || basename(hint.resolved_path);
+            const candidateName = hint.name || fileLabel || hint.mime || `attachment-${index + 1}`;
+            const name = candidateName || `attachment-${index + 1}`;
+            const description = fileLabel || hint.mime || "Message attachment";
+            const link: ToolResourceLink = {
+              type: "resource_link",
+              uri: resolved,
+              name,
+              description,
+              mimeType: hint.mime ?? undefined,
+            };
+            return link;
+          })
+          .filter((link): link is ToolResourceLink => Boolean(link)) ?? [];
       const formatLine = (msg: NormalizedMessage): string => {
         const when = msg.iso_local ?? msg.iso_utc ?? "";
         const speaker = msg.from_me ? "Me" : (msg.sender ? displayRecipient(msg.sender) : "Unknown");
@@ -2068,11 +2712,12 @@ function createConfiguredServer(): McpServer {
       return {
         content: textContent(JSON.stringify(document)),
         structuredContent: document,
+        resourceLinks: resourceLinks.length ? resourceLinks : undefined,
       };
     }
   );
 
-// context_around_message tool
+  // context_around_message tool
   server.registerTool(
     "context_around_message",
     {
@@ -2103,12 +2748,18 @@ function createConfiguredServer(): McpServer {
           .describe("Include attachment metadata in the returned window."),
       },
       outputSchema: {
-        messages: z.array(normalizedMessageSchema)
-      }
+        messages: z.array(normalizedMessageSchema),
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ message_rowid, before, after, include_attachments_meta }) => {
       const rows = await contextAroundMessage(message_rowid, before, after, !!include_attachments_meta);
-      const mapped = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
+      const mapped = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort(
+        (a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0),
+      );
       return {
         content: textContent(JSON.stringify(mapped, null, 2)),
         structuredContent: { messages: mapped },
@@ -2121,7 +2772,8 @@ function createConfiguredServer(): McpServer {
     "get_attachments",
     {
       title: "Get Attachments",
-      description: "Fetch attachment metadata and resolved file paths for specific message row IDs (per-message cap enforced).",
+      description:
+        "Fetch attachment metadata and resolved file paths for specific message row IDs (per-message cap enforced).",
       inputSchema: {
         message_rowids: z
           .array(z.number().int())
@@ -2138,7 +2790,11 @@ function createConfiguredServer(): McpServer {
       },
       outputSchema: {
         attachments: z.array(attachmentRecordSchema),
-      }
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ message_rowids, per_message_cap }) => {
       try {
@@ -2160,7 +2816,8 @@ function createConfiguredServer(): McpServer {
     "search_messages_safe",
     {
       title: "Search Messages Safe",
-      description: "Search or fetch recent conversation history with mandatory scope (chat, participant, or days_back ≤ 365).",
+      description:
+        "Search or fetch recent conversation history with mandatory scope (chat, participant, or days_back ≤ 365).",
       inputSchema: {
         query: z
           .string()
@@ -2209,19 +2866,23 @@ function createConfiguredServer(): McpServer {
           .describe("Include attachment metadata in search results when true."),
       },
       outputSchema: {
-        results: z.array(searchResultSchema)
-      }
+        results: z.array(searchResultSchema),
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async (input) => {
       if (input.chat_id == null && !input.participant && !(input.days_back && input.days_back > 0)) {
-        logger.warn("search_messages_safe rejected", {
+        mcpLog.warn("search_messages_safe rejected", {
           query: input.query,
           reason: "missing_scope_filters",
         });
         return { content: textContent("Provide chat_id, participant, or days_back."), isError: true };
       }
       const now = Date.now();
-      const from = input.chat_id != null || input.participant ? undefined : (now - (input.days_back ?? 30) * 86400000);
+      const from = input.chat_id != null || input.participant ? undefined : now - (input.days_back ?? 30) * 86400000;
       try {
         const rows = await searchMessages({
           query: input.query,
@@ -2253,7 +2914,7 @@ function createConfiguredServer(): McpServer {
           const chatId = msg.chat_id ?? chatLookup.get(msg.message_rowid) ?? 0;
           return { ...msg, chat_id: chatId, snippet };
         });
-        logger.info("search_messages_safe", {
+        mcpLog.info("search_messages_safe", {
           query: input.query,
           chat_id: input.chat_id ?? null,
           participant: input.participant ?? null,
@@ -2269,7 +2930,7 @@ function createConfiguredServer(): McpServer {
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         const msg = `Failed to search messages safely. Error: ${message}`;
-        logger.error("search_messages_safe failed", {
+        mcpLog.error("search_messages_safe failed", {
           query: input.query,
           chat_id: input.chat_id ?? null,
           participant: input.participant ?? null,
@@ -2317,14 +2978,20 @@ function createConfiguredServer(): McpServer {
       outputSchema: {
         summary: z.string(),
         lines: z.array(z.string()),
-      }
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ message_rowid, before, after, max_chars }) => {
       const rows = await contextAroundMessage(message_rowid, before, after, false);
-      const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
+      const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort(
+        (a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0),
+      );
       const ordered = normalized.map((msg) => ({
         t: msg.unix_ms ?? 0,
-        from: msg.from_me ? "me" : (msg.sender || "other"),
+        from: msg.from_me ? "me" : msg.sender || "other",
         text: msg.text || "",
       }));
       const start = ordered[0]?.t;
@@ -2334,19 +3001,23 @@ function createConfiguredServer(): McpServer {
         acc[r.from] = (acc[r.from] || 0) + 1;
         return acc;
       }, {} as Record<string, number>);
-      const summary = `Window: ${start ? new Date(start).toISOString() : ""} → ${end ? new Date(end).toISOString() : ""} | Participants: ${participants.join(', ')} | Counts: ${Object.entries(counts).map(([k,v])=>k+': '+v).join(', ')}`;
+      const summary = `Window: ${start ? new Date(start).toISOString() : ""} → ${
+        end ? new Date(end).toISOString() : ""
+      } | Participants: ${participants.join(", ")} | Counts: ${Object.entries(counts)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join(", ")}`;
       const lines: string[] = [];
       for (const r of ordered) {
-        const stamp = new Date(r.t).toLocaleString('en-US', { hour12: false });
+        const stamp = new Date(r.t).toLocaleString("en-US", { hour12: false });
         const line = `${stamp} ${r.from}: ${r.text}`;
         lines.push(line);
       }
-      // Trim to max_chars
-      let out: string[] = [];
+      const out: string[] = [];
       let used = 0;
       for (const l of lines) {
         if (used + l.length + 1 > max_chars) break;
-        out.push(l); used += l.length + 1;
+        out.push(l);
+        used += l.length + 1;
       }
       return {
         content: textContent(summary + "\n" + out.join("\n")),
@@ -2354,6 +3025,91 @@ function createConfiguredServer(): McpServer {
       };
     }
   );
+
+  server.registerResource(
+    "inbox",
+    INBOX_RESOURCE_URI,
+    {
+      title: "Inbox Snapshot",
+      description: "Latest conversations across Messages with their most recent activity.",
+      mimeType: "application/json",
+    },
+    async () => {
+      const snapshot = await buildInboxSnapshot(INBOX_RESOURCE_LIMIT);
+      mcpLog.debug("inbox resource generated", {
+        conversation_count: snapshot.total_conversations,
+        total_unread: snapshot.total_unread,
+      });
+      return {
+        contents: [
+          {
+            uri: INBOX_RESOURCE_URI,
+            mimeType: "application/json",
+            text: JSON.stringify(snapshot, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
+  const conversationTemplate = new ResourceTemplate(CONVERSATION_RESOURCE_TEMPLATE_URI, {
+    list: async () => {
+      const chats = await listChats(CONVERSATION_RESOURCE_LIST_LIMIT);
+      const resources = chats.map((chat) => {
+        const participants = extractParticipantsList(chat.participants);
+        const label =
+          chat.display_name?.trim?.() ||
+          (participants.length ? participants.join(", ") : chat.guid) ||
+          `chat-${chat.chat_id}`;
+        const lastUnix = appleEpochToUnixMs(chat.last_message_date);
+        return {
+          uri: `messages://conversation/chat-id/${encodeURIComponent(String(chat.chat_id))}`,
+          name: label,
+          description:
+            participants.length > 0
+              ? `Participants: ${participants.join(", ")}`
+              : `Chat ${chat.chat_id}`,
+          mimeType: "application/json",
+          last_message_iso: toIsoUtc(lastUnix),
+        };
+      });
+      return { resources };
+    },
+  });
+
+  server.registerResource(
+    "conversation",
+    conversationTemplate,
+    {
+      title: "Conversation Transcript",
+      description: "Detailed transcript for an individual Messages chat.",
+      mimeType: "application/json",
+    },
+    async (uri, variables) => {
+      const selector = (variables?.selector ?? variables?.Selector ?? "").toString();
+      const value = (variables?.value ?? variables?.Value ?? "").toString();
+      if (!selector || !value) {
+        throw new Error("Conversation resources require both selector and value path segments.");
+      }
+      const payload = await buildConversationResourcePayload(selector, value);
+      mcpLog.debug("conversation resource generated", {
+        selector: payload.selector,
+        value: payload.value,
+        chat_id: payload.chat.chat_id,
+        message_count: payload.messages.length,
+      });
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(payload, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
   return server;
 }
 
@@ -2425,16 +3181,31 @@ function configureOAuth(app: express.Express): OAuthSetupResult | null {
   return { guard, protectHealth };
 }
 
-function parseLaunchOptions(): LaunchOptions {
+function parseLaunchOptions(config?: MessagesConfig): LaunchOptions {
   const args = process.argv.slice(2);
-  let mode: "stdio" | "http" = parseEnvBool("MESSAGES_MCP_HTTP", false) || process.env.MESSAGES_MCP_HTTP_PORT ? "http" : "stdio";
+  const envHttpFlagDefined = process.env.MESSAGES_MCP_HTTP != null;
+  const envHttpPortDefined = process.env.MESSAGES_MCP_HTTP_PORT != null;
+  const envHostDefined = process.env.MESSAGES_MCP_HTTP_HOST != null;
+  const envSseDefined = process.env.MESSAGES_MCP_HTTP_ENABLE_SSE != null;
+  const envDnsDefined = process.env.MESSAGES_MCP_HTTP_DNS_PROTECTION != null;
+  const envAllowedHostsDefined = process.env.MESSAGES_MCP_HTTP_ALLOWED_HOSTS != null;
+  const envCorsDefined = process.env.MESSAGES_MCP_HTTP_CORS_ORIGINS != null;
+
+  let mode: "stdio" | "http" = parseEnvBool("MESSAGES_MCP_HTTP", false) || envHttpPortDefined ? "http" : "stdio";
   let port = parsePort(process.env.MESSAGES_MCP_HTTP_PORT, 3000);
   let host = (process.env.MESSAGES_MCP_HTTP_HOST || "0.0.0.0").trim() || "0.0.0.0";
   let enableSseFallback = parseEnvBool("MESSAGES_MCP_HTTP_ENABLE_SSE", false);
-  let dnsRebindingProtection = parseEnvBool("MESSAGES_MCP_HTTP_DNS_PROTECTION", false);
+  let dnsRebindingProtection = parseEnvBool("MESSAGES_MCP_HTTP_DNS_PROTECTION", true);
   let allowedHosts = parseCsv(process.env.MESSAGES_MCP_HTTP_ALLOWED_HOSTS);
   let corsOrigins = parseCsv(process.env.MESSAGES_MCP_HTTP_CORS_ORIGINS);
-  if (!corsOrigins.length) corsOrigins = ["*"];
+
+  let modeExplicit = envHttpFlagDefined || envHttpPortDefined;
+  let portExplicit = envHttpPortDefined;
+  let hostExplicit = envHostDefined;
+  let sseExplicit = envSseDefined;
+  let dnsExplicit = envDnsDefined;
+  let allowedHostsExplicit = envAllowedHostsDefined;
+  let corsExplicit = envCorsDefined;
 
   const takeValue = (index: number): string | undefined => {
     const value = args[index + 1];
@@ -2445,10 +3216,12 @@ function parseLaunchOptions(): LaunchOptions {
     const arg = args[i];
     if (arg === "--http") {
       mode = "http";
+      modeExplicit = true;
       continue;
     }
     if (arg === "--stdio") {
       mode = "stdio";
+      modeExplicit = true;
       continue;
     }
     if (arg === "--port") {
@@ -2457,12 +3230,16 @@ function parseLaunchOptions(): LaunchOptions {
         port = parsePort(value, port);
         i++;
         mode = "http";
+        portExplicit = true;
+        modeExplicit = true;
       }
       continue;
     }
     if (arg.startsWith("--port=")) {
       port = parsePort(arg.split("=", 2)[1], port);
       mode = "http";
+      portExplicit = true;
+      modeExplicit = true;
       continue;
     }
     if (arg === "--host") {
@@ -2471,20 +3248,26 @@ function parseLaunchOptions(): LaunchOptions {
         host = value;
         i++;
         mode = "http";
+        hostExplicit = true;
+        modeExplicit = true;
       }
       continue;
     }
     if (arg.startsWith("--host=")) {
       host = arg.split("=", 2)[1];
       mode = "http";
+      hostExplicit = true;
+      modeExplicit = true;
       continue;
     }
     if (arg === "--enable-sse" || arg === "--sse") {
       enableSseFallback = true;
+      sseExplicit = true;
       continue;
     }
     if (arg === "--disable-sse") {
       enableSseFallback = false;
+      sseExplicit = true;
       continue;
     }
     if (arg === "--cors-origin") {
@@ -2493,19 +3276,23 @@ function parseLaunchOptions(): LaunchOptions {
         corsOrigins = value === "*" ? ["*"] : [...new Set([...corsOrigins.filter((o) => o !== "*"), value])];
         i++;
       }
+      corsExplicit = true;
       continue;
     }
     if (arg.startsWith("--cors-origin=")) {
       const value = arg.split("=", 2)[1];
       corsOrigins = value === "*" ? ["*"] : [...new Set([...corsOrigins.filter((o) => o !== "*"), value])];
+      corsExplicit = true;
       continue;
     }
     if (arg === "--enable-dns-protection") {
       dnsRebindingProtection = true;
+      dnsExplicit = true;
       continue;
     }
     if (arg === "--disable-dns-protection") {
       dnsRebindingProtection = false;
+      dnsExplicit = true;
       continue;
     }
     if (arg === "--allowed-host") {
@@ -2514,16 +3301,53 @@ function parseLaunchOptions(): LaunchOptions {
         allowedHosts = [...new Set([...allowedHosts, value])];
         i++;
       }
+      allowedHostsExplicit = true;
       continue;
     }
     if (arg.startsWith("--allowed-host=")) {
       const value = arg.split("=", 2)[1];
       allowedHosts = [...new Set([...allowedHosts, value])];
+      allowedHostsExplicit = true;
       continue;
     }
   }
 
+  if (!modeExplicit && config?.transport === "http") {
+    mode = "http";
+  }
+
   if (mode === "http") {
+    const httpConfig = config?.http;
+    if (httpConfig) {
+      if (!portExplicit && typeof httpConfig.port === "number") {
+        port = httpConfig.port;
+      }
+      if (!hostExplicit && typeof httpConfig.host === "string") {
+        host = httpConfig.host;
+      }
+      if (!sseExplicit && typeof httpConfig.enableSseFallback === "boolean") {
+        enableSseFallback = httpConfig.enableSseFallback;
+      }
+      if (!dnsExplicit && typeof httpConfig.dnsRebindingProtection === "boolean") {
+        dnsRebindingProtection = httpConfig.dnsRebindingProtection;
+      }
+      if (!allowedHostsExplicit && Array.isArray(httpConfig.allowedHosts) && httpConfig.allowedHosts.length) {
+        allowedHosts = [...new Set(httpConfig.allowedHosts)];
+      }
+      if (!corsExplicit && Array.isArray(httpConfig.corsOrigins) && httpConfig.corsOrigins.length) {
+        corsOrigins = [...new Set(httpConfig.corsOrigins)];
+      }
+    }
+    if (dnsRebindingProtection && !allowedHosts.length) {
+      allowedHosts = buildDefaultHostAllowlist(host, port);
+    }
+    allowedHosts = normalizeAllowedHosts(allowedHosts, port);
+    if (!corsOrigins.length) {
+      corsOrigins = buildDefaultCorsOrigins(host, port);
+    }
+    if (!corsExplicit && !corsOrigins.includes("*")) {
+      corsOrigins = ["*"];
+    }
     return {
       mode: "http",
       port,
@@ -2542,11 +3366,12 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
   if (options.corsOrigins.length) {
-    const originSetting = options.corsOrigins.length === 1 && options.corsOrigins[0] === "*" ? "*" : options.corsOrigins;
+    const originSetting =
+      options.corsOrigins.length === 1 && options.corsOrigins[0] === "*" ? "*" : options.corsOrigins;
     app.use(cors({
       origin: originSetting,
       exposedHeaders: ["Mcp-Session-Id"],
-      allowedHeaders: ["Content-Type", "mcp-session-id"],
+      allowedHeaders: ["Content-Type", "Mcp-Session-Id", "MCP-Protocol-Version"],
     }));
   }
 
@@ -2565,6 +3390,55 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
 
   const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: McpServer }>();
   const legacySessions = new Map<string, { transport: SSEServerTransport; server: McpServer }>();
+
+  function* enumerateConnectedServers(): IterableIterator<McpServer> {
+    for (const entry of sessions.values()) {
+      yield entry.server;
+    }
+    for (const entry of legacySessions.values()) {
+      yield entry.server;
+    }
+  }
+
+  const httpLog = {
+    debug: (...args: unknown[]) => broadcastLog("debug", args, enumerateConnectedServers()),
+    info: (...args: unknown[]) => broadcastLog("info", args, enumerateConnectedServers()),
+    warn: (...args: unknown[]) => broadcastLog("warning", args, enumerateConnectedServers()),
+    error: (...args: unknown[]) => broadcastLog("error", args, enumerateConnectedServers()),
+  } as const;
+
+  app.get("/mcp/manifest", (_req: Request, res: Response) => {
+    const versionInfo = getVersionInfoSync();
+    const manifest = {
+      manifestVersion: CONNECTOR_MANIFEST_VERSION,
+      name: versionInfo.name,
+      version: versionInfo.version,
+      description: "Expose macOS Messages history, search, and sending flows over MCP.",
+      documentationUrl: CONNECTOR_DEFAULT_DOCS_URL,
+      contact: {
+        email: CONNECTOR_DEFAULT_CONTACT,
+      },
+      legal: {
+        privacyPolicyUrl: CONNECTOR_DEFAULT_PRIVACY_URL,
+        termsOfServiceUrl: CONNECTOR_DEFAULT_TOS_URL,
+      },
+      security: {
+        authentication: authGuard ? "oauth" : "none",
+      },
+      transport: {
+        type: "streamable-http" as const,
+        endpoints: {
+          command: "/mcp",
+          sse: options.enableSseFallback ? "/sse" : null,
+        },
+        allowedHosts: options.allowedHosts,
+        dnsRebindingProtection: options.dnsRebindingProtection,
+      },
+      capabilities: CONNECTOR_MANIFEST_CAPABILITIES,
+      tools: CONNECTOR_MANIFEST_TOOLS,
+    };
+    res.json(manifest);
+  });
 
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ ok: true });
@@ -2585,9 +3459,11 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId) => {
             sessions.set(newSessionId, { transport, server });
+            openLogViewer();
           },
           enableDnsRebindingProtection: options.dnsRebindingProtection,
           allowedHosts: options.allowedHosts.length ? options.allowedHosts : undefined,
+          allowedOrigins: options.corsOrigins.includes("*") ? undefined : options.corsOrigins,
         });
         transport.onclose = () => {
           const id = transport.sessionId;
@@ -2610,7 +3486,7 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
         id: null,
       });
     } catch (error) {
-      logger.error("HTTP transport error:", error);
+      httpLog.error("HTTP transport error:", error);
       res.status(500).json({
         jsonrpc: "2.0",
         error: {
@@ -2645,6 +3521,7 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
         server.close().catch(() => {});
       });
       await server.connect(transport);
+      openLogViewer();
     });
 
     app.post("/messages", async (req: Request, res: Response) => {
@@ -2663,13 +3540,13 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
     let server: ReturnType<typeof app.listen> | null = null;
     try {
       server = app.listen(options.port, options.host, () => {
-        logger.info(`messages-app-mcp HTTP server listening on http://${options.host}:${options.port}`);
+        httpLog.info(`messages-app-mcp HTTP server listening on http://${options.host}:${options.port}`);
         if (options.enableSseFallback) {
-          logger.info("Legacy SSE fallback enabled at /sse");
+          httpLog.info("Legacy SSE fallback enabled at /sse");
         }
       });
     } catch (error) {
-      logger.error("HTTP server failed to start", error);
+      httpLog.error("HTTP server failed to start", error);
       reject(error instanceof Error ? error : new Error(String(error)));
       return;
     }
@@ -2704,7 +3581,7 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
     }
 
     function onError(error: Error) {
-      logger.error("HTTP server error", error);
+      httpLog.error("HTTP server error", error);
       settleReject(error);
     }
 
@@ -2757,6 +3634,7 @@ async function runStdioServer(): Promise<void> {
 
   try {
     await server.connect(transport);
+    openLogViewer();
     if (!process.stdin.destroyed) {
       process.stdin.resume();
     }
@@ -2770,15 +3648,35 @@ async function runStdioServer(): Promise<void> {
   }
 }
 
-async function main() {
-  const launch = parseLaunchOptions();
-  logger.info("messages-app-mcp starting", { mode: launch.mode });
-  if (launch.mode === "stdio") {
+export class MessagesRuntime {
+  constructor(private readonly config: MessagesConfig) {}
+
+  createServer(): McpServer {
+    return createConfiguredServer();
+  }
+
+  async startStdio(): Promise<void> {
     await runStdioServer();
+  }
+
+  async startHttp(options: HttpLaunchOptions): Promise<void> {
+    await runHttpServer(options);
+  }
+}
+
+async function main() {
+  const config = await loadMessagesConfig();
+  applyConfigToLogViewer(config);
+  const runtime = new MessagesRuntime(config);
+  const launch = parseLaunchOptions(config);
+  logger.info("messages-app-mcp starting", { mode: launch.mode });
+  await ensureLogViewer();
+  if (launch.mode === "stdio") {
+    await runtime.startStdio();
     return;
   }
 
-  await runHttpServer(launch);
+  await runtime.startHttp(launch);
 }
 
 main().catch((err) => {
