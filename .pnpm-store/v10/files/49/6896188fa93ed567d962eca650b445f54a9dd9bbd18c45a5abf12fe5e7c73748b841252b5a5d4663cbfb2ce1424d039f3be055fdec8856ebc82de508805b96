@@ -1,0 +1,8 @@
+export { AttributedStringParser } from './parsers/attributed-string-parser';
+export { TypedStreamParser } from './parsers/typedstream-parser';
+export { IMessageDatabase, MessageRow, MessageWithChat, ChatRow } from './imessage-database';
+export * from './types';
+export * from './utils/message-links';
+import { ParserOptions, ParsedMessage } from './types';
+export declare function parseAttributedBody(buffer: Buffer, options?: ParserOptions): ParsedMessage;
+//# sourceMappingURL=index.d.ts.map

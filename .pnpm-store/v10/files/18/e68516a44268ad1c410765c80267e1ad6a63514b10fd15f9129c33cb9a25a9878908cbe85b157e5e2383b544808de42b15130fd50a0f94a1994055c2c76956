@@ -1,0 +1,22 @@
+export declare class BufferReader {
+    private buffer;
+    private offset;
+    constructor(buffer: Buffer, initialOffset?: number);
+    get position(): number;
+    get length(): number;
+    get remaining(): number;
+    seek(position: number): void;
+    skip(bytes: number): void;
+    readUInt8(): number;
+    readUInt16LE(): number;
+    readUInt16BE(): number;
+    readUInt32LE(): number;
+    readUInt32BE(): number;
+    readBytes(length: number): Buffer;
+    readString(length: number, encoding?: BufferEncoding): string;
+    findPattern(pattern: Buffer | string): number;
+    readUntil(delimiter: Buffer | string): Buffer | null;
+    peekByte(): number | null;
+    peekBytes(length: number): Buffer | null;
+}
+//# sourceMappingURL=buffer-reader.d.ts.map

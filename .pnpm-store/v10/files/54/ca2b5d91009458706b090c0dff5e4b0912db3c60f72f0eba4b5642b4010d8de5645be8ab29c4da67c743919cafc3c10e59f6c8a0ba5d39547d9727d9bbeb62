@@ -1,0 +1,73 @@
+export interface ParsedMessage {
+    text: string;
+    link: string;
+    attributes?: MessageAttributes;
+    rawData?: Buffer;
+}
+export interface MessageAttributes {
+    bold?: Range[];
+    italic?: Range[];
+    underline?: Range[];
+    strikethrough?: Range[];
+    links?: LinkAttribute[];
+    mentions?: MentionAttribute[];
+    attachments?: AttachmentAttribute[];
+    dataDetectors?: DataDetectorAttribute[];
+    fonts?: FontAttribute[];
+    colors?: ColorAttribute[];
+    backgroundColor?: ColorAttribute;
+    paragraphStyles?: ParagraphStyleAttribute[];
+}
+export interface Range {
+    location: number;
+    length: number;
+}
+export interface LinkAttribute extends Range {
+    url: string;
+}
+export interface MentionAttribute extends Range {
+    handle: string;
+}
+export interface AttachmentAttribute extends Range {
+    guid: string;
+    type: string;
+    filename?: string;
+    mimeType?: string;
+}
+export interface DataDetectorAttribute extends Range {
+    type: 'date' | 'time' | 'address' | 'phone' | 'url' | 'flight' | 'measurement';
+    value: string;
+    metadata?: any;
+}
+export interface FontAttribute extends Range {
+    family?: string;
+    size?: number;
+    weight?: 'normal' | 'bold' | 'semibold' | 'heavy';
+    style?: 'normal' | 'italic' | 'oblique';
+}
+export interface ColorAttribute extends Range {
+    color: string;
+    rgba?: number[];
+    hex?: string;
+}
+export interface ParagraphStyleAttribute extends Range {
+    alignment?: 'left' | 'center' | 'right' | 'justified';
+    lineSpacing?: number;
+    paragraphSpacing?: number;
+}
+export interface TypedStreamHeader {
+    version: number;
+    byteOrder: 'big' | 'little';
+}
+export interface NSStringData {
+    className: string;
+    content: string;
+    encoding?: string;
+}
+export interface ParserOptions {
+    preserveFormatting?: boolean;
+    includeMetadata?: boolean;
+    cleanOutput?: boolean;
+    encoding?: BufferEncoding;
+}
+//# sourceMappingURL=index.d.ts.map

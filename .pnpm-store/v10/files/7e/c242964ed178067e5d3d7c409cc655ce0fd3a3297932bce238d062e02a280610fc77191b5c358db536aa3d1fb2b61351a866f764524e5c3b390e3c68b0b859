@@ -1,0 +1,58 @@
+export interface NSDictionaryEntry {
+    key: string;
+    value: any;
+    type: string;
+}
+/**
+ * Parser for NSDictionary structures in typedstream format
+ * These contain formatting attributes in iMessage
+ */
+export declare class NSDictionaryParser {
+    private reader;
+    constructor(buffer: Buffer, offset?: number);
+    /**
+     * Parse NSDictionary structure
+     */
+    parse(): Map<string, any> | null;
+    /**
+     * Parse attribute value based on key type
+     */
+    private parseAttributeValue;
+    /**
+     * Parse font information
+     */
+    private parseFontValue;
+    /**
+     * Parse color information
+     */
+    private parseColorValue;
+    /**
+     * Parse link URL
+     */
+    private parseLinkValue;
+    /**
+     * Parse mention (@ handle)
+     */
+    private parseMentionValue;
+    /**
+     * Parse data detected items (dates, addresses, etc.)
+     */
+    private parseDataDetectedValue;
+    /**
+     * Extract date/time value
+     */
+    private extractDateTimeValue;
+    /**
+     * Parse generic value
+     */
+    private parseGenericValue;
+    /**
+     * Parse font formatting attributes
+     */
+    private parseFontAttributes;
+    /**
+     * Parse range attributes (location and length for formatting)
+     */
+    private parseRangeAttributes;
+}
+//# sourceMappingURL=nsdictionary-parser.d.ts.map

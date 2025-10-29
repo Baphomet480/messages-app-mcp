@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { runAppleScriptInline } from "./applescript.js";
+import { runAppleScriptInline, getMessagesServiceSnapshot } from "./applescript.js";
 import { getChatDbPath } from "./sqlite.js";
 import { getVersionInfo } from "./version.js";
 
@@ -39,20 +39,11 @@ export async function runDoctor(): Promise<DoctorReport & { summary: string }> {
   let accounts: string[] = [];
   if (osascript_available) {
     try {
-      const s = await runAppleScriptInline(
-        'on run argv\ntry\n  tell application "Messages"\n    set t to service type of every service\n    return t as string\n  end tell\nend try\nreturn ""\nend run'
-      );
-      services = s ? s.split(/,\s*/).filter(Boolean) : [];
+      const snapshot = await getMessagesServiceSnapshot();
+      services = snapshot.services;
+      accounts = snapshot.accounts;
     } catch {
       notes.push("Unable to query Messages services via AppleScript.");
-    }
-    try {
-      const a = await runAppleScriptInline(
-        'on run argv\ntry\n  tell application "Messages"\n    set t to service type of every account\n    return t as string\n  end tell\nend try\nreturn ""\nend run'
-      );
-      accounts = a ? a.split(/,\s*/).filter(Boolean) : [];
-    } catch {
-      notes.push("Unable to query Messages accounts via AppleScript.");
     }
   }
 

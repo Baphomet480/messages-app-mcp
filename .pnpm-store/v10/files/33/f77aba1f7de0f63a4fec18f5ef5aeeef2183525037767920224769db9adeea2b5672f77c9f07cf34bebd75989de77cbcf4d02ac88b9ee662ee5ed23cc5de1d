@@ -1,0 +1,33 @@
+import { NSStringData } from '../types';
+/**
+ * Parser for Apple's typedstream format used in NSArchiver
+ * Based on format analysis and pytypedstream implementation
+ */
+export declare class TypedStreamParser {
+    private reader;
+    private header?;
+    private static readonly CLASS_MARKERS;
+    private static readonly MAGIC_BYTES;
+    constructor(buffer: Buffer);
+    /**
+     * Parse the typedstream header
+     */
+    private parseHeader;
+    /**
+     * Parse NSString objects from the stream
+     */
+    private parseNSString;
+    /**
+     * Parse all NSString objects in the buffer
+     */
+    parseAllNSStrings(): NSStringData[];
+    /**
+     * Extract readable text segments from the buffer
+     * This is a fallback method when proper parsing fails
+     */
+    extractReadableText(): string[];
+    private isValidUTF8Sequence;
+    private readUTF8Char;
+    private cleanText;
+}
+//# sourceMappingURL=typedstream-parser.d.ts.map

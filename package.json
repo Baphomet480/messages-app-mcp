@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "node --loader ts-node/esm src/index.ts",
     "start": "node dist/index.js",
-    "start:http": "MESSAGES_MCP_HTTP_ALLOWED_HOSTS=127.0.0.1 node dist/index.js --http --host 127.0.0.1 --port 3338 --enable-sse",
+    "start:http": "MESSAGES_MCP_HTTP_ALLOWED_HOSTS=127.0.0.1,localhost,::1 node dist/index.js --http --host 127.0.0.1 --port 3338 --enable-sse",
     "test": "vitest run --coverage",
     "send": "node scripts/send.mjs",
     "doctor": "node scripts/doctor.mjs",
@@ -40,10 +40,11 @@
   "files": [
     "dist",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "scripts/ai-search.swift"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.18.0",
+    "@modelcontextprotocol/sdk": "^1.20.2",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "express-openid-connect": "^2.19.2",

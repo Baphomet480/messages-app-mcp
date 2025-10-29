@@ -1,0 +1,34 @@
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __exportStar = (this && this.__exportStar) || function(m, exports) {
+    for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.IMessageDatabase = exports.TypedStreamParser = exports.AttributedStringParser = void 0;
+exports.parseAttributedBody = parseAttributedBody;
+var attributed_string_parser_1 = require("./parsers/attributed-string-parser");
+Object.defineProperty(exports, "AttributedStringParser", { enumerable: true, get: function () { return attributed_string_parser_1.AttributedStringParser; } });
+var typedstream_parser_1 = require("./parsers/typedstream-parser");
+Object.defineProperty(exports, "TypedStreamParser", { enumerable: true, get: function () { return typedstream_parser_1.TypedStreamParser; } });
+var imessage_database_1 = require("./imessage-database");
+Object.defineProperty(exports, "IMessageDatabase", { enumerable: true, get: function () { return imessage_database_1.IMessageDatabase; } });
+__exportStar(require("./types"), exports);
+__exportStar(require("./utils/message-links"), exports);
+const attributed_string_parser_2 = require("./parsers/attributed-string-parser");
+// Convenience function for parsing a single attributedBody buffer
+// Note: This will return an empty link since there's no message context
+function parseAttributedBody(buffer, options) {
+    const parser = new attributed_string_parser_2.AttributedStringParser(options);
+    return parser.parse(buffer);
+}
+//# sourceMappingURL=index.js.map

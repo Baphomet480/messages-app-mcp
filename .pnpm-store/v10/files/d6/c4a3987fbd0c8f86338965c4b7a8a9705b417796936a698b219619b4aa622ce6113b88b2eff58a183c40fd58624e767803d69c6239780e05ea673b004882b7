@@ -1,0 +1,65 @@
+import { ParsedMessage, ParserOptions } from './types';
+export interface MessageRow {
+    ROWID: number;
+    guid: string;
+    text: string | null;
+    attributedBody: Buffer | null;
+    date: number;
+    is_from_me: number;
+    handle_id: string | null;
+    cache_has_attachments: number;
+}
+export interface MessageWithChat extends MessageRow {
+    chat_guid?: string;
+    chat_identifier?: string;
+    chat_display_name?: string;
+}
+export interface ChatRow {
+    ROWID: number;
+    guid: string;
+    chat_identifier: string;
+    display_name: string | null;
+}
+export declare class IMessageDatabase {
+    private db;
+    private parser;
+    private static readonly DEFAULT_DB_PATH;
+    constructor(dbPath?: string, parserOptions?: ParserOptions);
+    /**
+     * Get all chats
+     */
+    getChats(): Promise<ChatRow[]>;
+    /**
+     * Get messages from a specific chat
+     */
+    getMessagesFromChat(chatId: number, limit?: number, offset?: number): Promise<MessageRow[]>;
+    /**
+     * Parse a message row to extract text content
+     * Always includes a link to the message (empty string if no GUID)
+     */
+    parseMessage(message: MessageRow): ParsedMessage;
+    /**
+     * Search messages by content
+     */
+    searchMessages(searchTerm: string, limit?: number): Promise<Array<MessageRow & {
+        chat_display_name?: string;
+    }>>;
+    /**
+     * Get messages with attributedBody in a date range
+     */
+    getAttributedMessagesInRange(startDate: Date, endDate: Date, chatName?: string): Promise<MessageRow[]>;
+    /**
+     * Get messages with full chat information for building complete links
+     */
+    getMessagesWithChatInfo(chatId: number, limit?: number, offset?: number): Promise<MessageWithChat[]>;
+    /**
+     * Parse a message with chat context to include appropriate links
+     * Provides better link fallbacks using chat information when message GUID is missing
+     */
+    parseMessageWithChat(message: MessageWithChat): ParsedMessage;
+    /**
+     * Close the database connection
+     */
+    close(): Promise<void>;
+}
+//# sourceMappingURL=imessage-database.d.ts.map

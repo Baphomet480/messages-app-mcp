@@ -1,0 +1,55 @@
+import { ParsedMessage, ParserOptions } from '../types';
+/**
+ * Parser for NSAttributedString format used in iMessage attributedBody
+ */
+export declare class AttributedStringParser {
+    private options;
+    constructor(options?: ParserOptions);
+    /**
+     * Parse an attributedBody buffer into structured message data
+     */
+    parse(buffer: Buffer): ParsedMessage;
+    /**
+     * Reconstruct formatted text from NSString objects
+     */
+    private reconstructText;
+    /**
+     * Merge readable text segments intelligently
+     */
+    private mergeReadableTexts;
+    private isMetadata;
+    private isNewParagraph;
+    /**
+     * Extract message attributes (formatting, links, etc.)
+     */
+    private extractAttributes;
+    /**
+     * Extract formatting ranges for a specific style
+     */
+    private extractFormattingRanges;
+    /**
+     * Extract link attributes
+     */
+    private extractLinks;
+    /**
+     * Extract mention attributes
+     */
+    private extractMentions;
+    /**
+     * Extract data detector attributes (dates, times, addresses, etc.)
+     */
+    private extractDataDetectors;
+    /**
+     * Extract font attributes
+     */
+    private extractFontAttributes;
+    /**
+     * Extract color attributes
+     */
+    private extractColorAttributes;
+    /**
+     * Find the nearest range information to a given position
+     */
+    private findNearestRange;
+}
+//# sourceMappingURL=attributed-string-parser.d.ts.map

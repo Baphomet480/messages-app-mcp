@@ -1,0 +1,32 @@
+import { MessageRow, ChatRow } from '../imessage-database';
+/**
+ * Utility functions for building iMessage deep links
+ */
+export interface MessageLink {
+    url: string;
+    type: 'sms' | 'imessage' | 'messages';
+    description: string;
+}
+/**
+ * Build deep links for a chat conversation
+ */
+export declare function buildChatLinks(chat: ChatRow): MessageLink[];
+/**
+ * Build deep link for a specific message
+ * Note: Opening specific messages may require special entitlements
+ */
+export declare function buildMessageLink(message: MessageRow): MessageLink;
+/**
+ * Build a "compose new message" link
+ */
+export declare function buildComposeLink(recipient: string, body?: string): MessageLink;
+/**
+ * Parse a chat identifier to extract the recipient
+ * @returns The phone number or email, or null if it's a group chat
+ */
+export declare function extractRecipient(chatIdentifier: string): string | null;
+/**
+ * Determine if a chat identifier represents a group chat
+ */
+export declare function isGroupChat(chatIdentifier: string): boolean;
+//# sourceMappingURL=message-links.d.ts.map

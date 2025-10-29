@@ -1,0 +1,818 @@
+2025-10-14 21:35:37,887 - INFO - Starting MCPO Server...
+2025-10-14 21:35:37,887 - INFO -   Name: MCP OpenAPI Proxy
+2025-10-14 21:35:37,887 - INFO -   Version: 1.0
+2025-10-14 21:35:37,887 - INFO -   Description: Automatically generated API from MCP Tool Schemas
+2025-10-14 21:35:37,887 - INFO -   Hostname: mac.lan
+2025-10-14 21:35:37,887 - INFO -   Port: 9000
+2025-10-14 21:35:37,887 - INFO -   API Key: Provided
+2025-10-14 21:35:37,887 - INFO -   CORS Allowed Origins: ['*']
+2025-10-14 21:35:37,887 - INFO -   Path Prefix: /
+2025-10-14 21:35:37,887 - INFO -   Root Path: 
+2025-10-14 21:35:37,887 - INFO - Configuring for a single StreamableHTTP MCP Server with URL http://127.0.0.1:8002/mcp
+2025-10-14 21:35:37,887 - INFO - Uvicorn server starting...
+INFO:     Started server process [16424]
+INFO:     Waiting for application startup.
+2025-10-14 21:35:37,949 - INFO - HTTP Request: POST http://127.0.0.1:8002/mcp "HTTP/1.1 200 OK"
+2025-10-14 21:35:37,949 - INFO - Received session ID: d1f357a7-e681-40b8-ab48-831d16145754
+2025-10-14 21:35:37,950 - INFO - Negotiated protocol version: 2025-06-18
+2025-10-14 21:35:37,953 - INFO - HTTP Request: POST http://127.0.0.1:8002/mcp "HTTP/1.1 202 Accepted"
+2025-10-14 21:35:37,954 - INFO - HTTP Request: GET http://127.0.0.1:8002/mcp "HTTP/1.1 200 OK"
+2025-10-14 21:35:37,958 - INFO - HTTP Request: POST http://127.0.0.1:8002/mcp "HTTP/1.1 200 OK"
+2025-10-14 21:35:37,974 - INFO - HTTP Request: DELETE http://127.0.0.1:8002/mcp "HTTP/1.1 200 OK"
+2025-10-14 21:35:37,974 - ERROR - Failed to connect to MCP server 'messages-app-mcp': ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 567, in lifespan
+  |     async with client_context as (reader, writer, *_):
+  |                ^^^^^^^^^^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.8/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 235, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 478, in streamablehttp_client
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Exception Group Traceback (most recent call last):
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 502, in streamablehttp_client
+    |     yield (
+    |     ...<3 lines>...
+    |     )
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 568, in lifespan
+    |     async with ClientSession(reader, writer) as session:
+    |                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/shared/session.py", line 218, in __aexit__
+    |     return await self._task_group.__aexit__(exc_type, exc_val, exc_tb)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+    |     raise BaseExceptionGroup(
+    |         "unhandled errors in a TaskGroup", self._exceptions
+    |     ) from None
+    | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+    +-+---------------- 1 ----------------
+      | Traceback (most recent call last):
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 570, in lifespan
+      |     await create_dynamic_endpoints(app, api_dependency=api_dependency)
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 390, in create_dynamic_endpoints
+      |     response_model_fields = get_model_fields(
+      |         f"{endpoint_name}_response_model",
+      |     ...<2 lines>...
+      |         outputSchema.get("$defs", {}),
+      |     )
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 251, in get_model_fields
+      |     python_type_hint, pydantic_field_info = _process_schema_property(
+      |                                             ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 219, in _process_schema_property
+      |     item_type_hint, _ = _process_schema_property(
+      |                         ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 121, in _process_schema_property
+      |     assert ref in schema_defs, "Custom field not found"
+      |            ^^^^^^^^^^^^^^^^^^
+      | AssertionError: Custom field not found
+      +------------------------------------
+ERROR:      + Exception Group Traceback (most recent call last):
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/starlette/routing.py", line 694, in lifespan
+  |     async with self.lifespan_context(app) as maybe_state:
+  |                ~~~~~~~~~~~~~~~~~~~~~^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.8/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 214, in __aenter__
+  |     return await anext(self.gen)
+  |            ^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 567, in lifespan
+  |     async with client_context as (reader, writer, *_):
+  |                ^^^^^^^^^^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.8/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 235, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 478, in streamablehttp_client
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Exception Group Traceback (most recent call last):
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 502, in streamablehttp_client
+    |     yield (
+    |     ...<3 lines>...
+    |     )
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 568, in lifespan
+    |     async with ClientSession(reader, writer) as session:
+    |                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/shared/session.py", line 218, in __aexit__
+    |     return await self._task_group.__aexit__(exc_type, exc_val, exc_tb)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+    |     raise BaseExceptionGroup(
+    |         "unhandled errors in a TaskGroup", self._exceptions
+    |     ) from None
+    | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+    +-+---------------- 1 ----------------
+      | Traceback (most recent call last):
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 570, in lifespan
+      |     await create_dynamic_endpoints(app, api_dependency=api_dependency)
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 390, in create_dynamic_endpoints
+      |     response_model_fields = get_model_fields(
+      |         f"{endpoint_name}_response_model",
+      |     ...<2 lines>...
+      |         outputSchema.get("$defs", {}),
+      |     )
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 251, in get_model_fields
+      |     python_type_hint, pydantic_field_info = _process_schema_property(
+      |                                             ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 219, in _process_schema_property
+      |     item_type_hint, _ = _process_schema_property(
+      |                         ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 121, in _process_schema_property
+      |     assert ref in schema_defs, "Custom field not found"
+      |            ^^^^^^^^^^^^^^^^^^
+      | AssertionError: Custom field not found
+      +------------------------------------
+
+ERROR:    Application startup failed. Exiting.
+2025-10-14 21:35:37,982 - WARNING - Server task exited unexpectedly. Initiating shutdown.
+2025-10-14 21:35:37,982 - INFO - Initiating server shutdown...
+2025-10-14 21:35:37,982 - INFO - Server shutdown complete
+2025-10-22 06:51:24,868 - INFO - Starting MCPO Server...
+2025-10-22 06:51:24,868 - INFO -   Name: MCP OpenAPI Proxy
+2025-10-22 06:51:24,868 - INFO -   Version: 1.0
+2025-10-22 06:51:24,868 - INFO -   Description: Automatically generated API from MCP Tool Schemas
+2025-10-22 06:51:24,868 - INFO -   Hostname: mac.lan
+2025-10-22 06:51:24,868 - INFO -   Port: 9000
+2025-10-22 06:51:24,868 - INFO -   API Key: Provided
+2025-10-22 06:51:24,868 - INFO -   CORS Allowed Origins: ['*']
+2025-10-22 06:51:24,868 - INFO -   Path Prefix: /
+2025-10-22 06:51:24,868 - INFO -   Root Path: 
+2025-10-22 06:51:24,868 - INFO - Configuring for a single StreamableHTTP MCP Server with URL http://127.0.0.1:8002/mcp
+2025-10-22 06:51:24,868 - INFO - Uvicorn server starting...
+INFO:     Started server process [52954]
+INFO:     Waiting for application startup.
+2025-10-22 06:51:24,944 - INFO - HTTP Request: POST http://127.0.0.1:8002/mcp "HTTP/1.1 403 Forbidden"
+2025-10-22 06:51:24,944 - ERROR - Failed to connect to MCP server 'MCP OpenAPI Proxy': ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 567, in lifespan
+  |     async with client_context as (reader, writer, *_):
+  |                ^^^^^^^^^^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 235, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 478, in streamablehttp_client
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 409, in handle_request_async
+    |     await self._handle_post_request(ctx)
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 278, in _handle_post_request
+    |     response.raise_for_status()
+    |     ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/httpx/_models.py", line 829, in raise_for_status
+    |     raise HTTPStatusError(message, request=request, response=self)
+    | httpx.HTTPStatusError: Client error '403 Forbidden' for url 'http://127.0.0.1:8002/mcp'
+    | For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/403
+    +------------------------------------
+ERROR:      + Exception Group Traceback (most recent call last):
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/starlette/routing.py", line 694, in lifespan
+  |     async with self.lifespan_context(app) as maybe_state:
+  |                ~~~~~~~~~~~~~~~~~~~~~^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 214, in __aenter__
+  |     return await anext(self.gen)
+  |            ^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 567, in lifespan
+  |     async with client_context as (reader, writer, *_):
+  |                ^^^^^^^^^^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 235, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 478, in streamablehttp_client
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 409, in handle_request_async
+    |     await self._handle_post_request(ctx)
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 278, in _handle_post_request
+    |     response.raise_for_status()
+    |     ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/httpx/_models.py", line 829, in raise_for_status
+    |     raise HTTPStatusError(message, request=request, response=self)
+    | httpx.HTTPStatusError: Client error '403 Forbidden' for url 'http://127.0.0.1:8002/mcp'
+    | For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/403
+    +------------------------------------
+
+ERROR:    Application startup failed. Exiting.
+2025-10-22 06:51:24,949 - WARNING - Server task exited unexpectedly. Initiating shutdown.
+2025-10-22 06:51:24,949 - INFO - Initiating server shutdown...
+2025-10-22 06:51:24,949 - INFO - Server shutdown complete
+2025-10-22 06:51:51,829 - INFO - Starting MCPO Server...
+2025-10-22 06:51:51,829 - INFO -   Name: MCP OpenAPI Proxy
+2025-10-22 06:51:51,829 - INFO -   Version: 1.0
+2025-10-22 06:51:51,829 - INFO -   Description: Automatically generated API from MCP Tool Schemas
+2025-10-22 06:51:51,829 - INFO -   Hostname: mac.lan
+2025-10-22 06:51:51,829 - INFO -   Port: 9000
+2025-10-22 06:51:51,829 - INFO -   API Key: Provided
+2025-10-22 06:51:51,829 - INFO -   CORS Allowed Origins: ['*']
+2025-10-22 06:51:51,829 - INFO -   Path Prefix: /
+2025-10-22 06:51:51,829 - INFO -   Root Path: 
+2025-10-22 06:51:51,829 - INFO - Configuring for a single StreamableHTTP MCP Server with URL http://127.0.0.1:8002/mcp
+2025-10-22 06:51:51,829 - INFO - Uvicorn server starting...
+INFO:     Started server process [53201]
+INFO:     Waiting for application startup.
+2025-10-22 06:51:51,876 - INFO - HTTP Request: POST http://127.0.0.1:8002/mcp "HTTP/1.1 403 Forbidden"
+2025-10-22 06:51:51,876 - ERROR - Failed to connect to MCP server 'MCP OpenAPI Proxy': ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 567, in lifespan
+  |     async with client_context as (reader, writer, *_):
+  |                ^^^^^^^^^^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 235, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 478, in streamablehttp_client
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 409, in handle_request_async
+    |     await self._handle_post_request(ctx)
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 278, in _handle_post_request
+    |     response.raise_for_status()
+    |     ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/httpx/_models.py", line 829, in raise_for_status
+    |     raise HTTPStatusError(message, request=request, response=self)
+    | httpx.HTTPStatusError: Client error '403 Forbidden' for url 'http://127.0.0.1:8002/mcp'
+    | For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/403
+    +------------------------------------
+ERROR:      + Exception Group Traceback (most recent call last):
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/starlette/routing.py", line 694, in lifespan
+  |     async with self.lifespan_context(app) as maybe_state:
+  |                ~~~~~~~~~~~~~~~~~~~~~^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 214, in __aenter__
+  |     return await anext(self.gen)
+  |            ^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 567, in lifespan
+  |     async with client_context as (reader, writer, *_):
+  |                ^^^^^^^^^^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 235, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 478, in streamablehttp_client
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 409, in handle_request_async
+    |     await self._handle_post_request(ctx)
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 278, in _handle_post_request
+    |     response.raise_for_status()
+    |     ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/httpx/_models.py", line 829, in raise_for_status
+    |     raise HTTPStatusError(message, request=request, response=self)
+    | httpx.HTTPStatusError: Client error '403 Forbidden' for url 'http://127.0.0.1:8002/mcp'
+    | For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/403
+    +------------------------------------
+
+ERROR:    Application startup failed. Exiting.
+2025-10-22 06:51:51,884 - WARNING - Server task exited unexpectedly. Initiating shutdown.
+2025-10-22 06:51:51,884 - INFO - Initiating server shutdown...
+2025-10-22 06:51:51,884 - INFO - Server shutdown complete
+2025-10-25 09:56:47,195 - INFO - Starting MCPO Server...
+2025-10-25 09:56:47,195 - INFO -   Name: MCP OpenAPI Proxy
+2025-10-25 09:56:47,195 - INFO -   Version: 1.0
+2025-10-25 09:56:47,195 - INFO -   Description: Automatically generated API from MCP Tool Schemas
+2025-10-25 09:56:47,195 - INFO -   Hostname: mac.lan
+2025-10-25 09:56:47,196 - INFO -   Port: 9000
+2025-10-25 09:56:47,196 - INFO -   API Key: Provided
+2025-10-25 09:56:47,196 - INFO -   CORS Allowed Origins: ['*']
+2025-10-25 09:56:47,196 - INFO -   Path Prefix: /
+2025-10-25 09:56:47,196 - INFO -   Root Path: 
+2025-10-25 09:56:47,196 - INFO - Configuring for a single StreamableHTTP MCP Server with URL http://127.0.0.1:3338/mcp
+2025-10-25 09:56:47,196 - INFO - Uvicorn server starting...
+INFO:     Started server process [71875]
+INFO:     Waiting for application startup.
+2025-10-25 09:56:47,255 - INFO - HTTP Request: POST http://127.0.0.1:3338/mcp "HTTP/1.1 200 OK"
+2025-10-25 09:56:47,255 - INFO - Received session ID: 1936c2a1-afea-4cd9-b1fc-6dc574e9aa0b
+2025-10-25 09:56:47,256 - INFO - Negotiated protocol version: 2025-06-18
+2025-10-25 09:56:47,259 - INFO - HTTP Request: POST http://127.0.0.1:3338/mcp "HTTP/1.1 202 Accepted"
+2025-10-25 09:56:47,259 - INFO - HTTP Request: GET http://127.0.0.1:3338/mcp "HTTP/1.1 200 OK"
+2025-10-25 09:56:47,266 - INFO - HTTP Request: POST http://127.0.0.1:3338/mcp "HTTP/1.1 200 OK"
+2025-10-25 09:56:47,286 - INFO - HTTP Request: DELETE http://127.0.0.1:3338/mcp "HTTP/1.1 200 OK"
+2025-10-25 09:56:47,286 - ERROR - Failed to connect to MCP server 'messages-app-mcp': ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 567, in lifespan
+  |     async with client_context as (reader, writer, *_):
+  |                ^^^^^^^^^^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 235, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 478, in streamablehttp_client
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Exception Group Traceback (most recent call last):
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 502, in streamablehttp_client
+    |     yield (
+    |     ...<3 lines>...
+    |     )
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 568, in lifespan
+    |     async with ClientSession(reader, writer) as session:
+    |                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/shared/session.py", line 218, in __aexit__
+    |     return await self._task_group.__aexit__(exc_type, exc_val, exc_tb)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+    |     raise BaseExceptionGroup(
+    |         "unhandled errors in a TaskGroup", self._exceptions
+    |     ) from None
+    | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+    +-+---------------- 1 ----------------
+      | Traceback (most recent call last):
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 570, in lifespan
+      |     await create_dynamic_endpoints(app, api_dependency=api_dependency)
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 390, in create_dynamic_endpoints
+      |     response_model_fields = get_model_fields(
+      |         f"{endpoint_name}_response_model",
+      |     ...<2 lines>...
+      |         outputSchema.get("$defs", {}),
+      |     )
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 251, in get_model_fields
+      |     python_type_hint, pydantic_field_info = _process_schema_property(
+      |                                             ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 219, in _process_schema_property
+      |     item_type_hint, _ = _process_schema_property(
+      |                         ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 121, in _process_schema_property
+      |     assert ref in schema_defs, "Custom field not found"
+      |            ^^^^^^^^^^^^^^^^^^
+      | AssertionError: Custom field not found
+      +------------------------------------
+ERROR:      + Exception Group Traceback (most recent call last):
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/starlette/routing.py", line 694, in lifespan
+  |     async with self.lifespan_context(app) as maybe_state:
+  |                ~~~~~~~~~~~~~~~~~~~~~^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 214, in __aenter__
+  |     return await anext(self.gen)
+  |            ^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 567, in lifespan
+  |     async with client_context as (reader, writer, *_):
+  |                ^^^^^^^^^^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 235, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 478, in streamablehttp_client
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Exception Group Traceback (most recent call last):
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 502, in streamablehttp_client
+    |     yield (
+    |     ...<3 lines>...
+    |     )
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 568, in lifespan
+    |     async with ClientSession(reader, writer) as session:
+    |                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/shared/session.py", line 218, in __aexit__
+    |     return await self._task_group.__aexit__(exc_type, exc_val, exc_tb)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+    |     raise BaseExceptionGroup(
+    |         "unhandled errors in a TaskGroup", self._exceptions
+    |     ) from None
+    | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+    +-+---------------- 1 ----------------
+      | Traceback (most recent call last):
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 570, in lifespan
+      |     await create_dynamic_endpoints(app, api_dependency=api_dependency)
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 390, in create_dynamic_endpoints
+      |     response_model_fields = get_model_fields(
+      |         f"{endpoint_name}_response_model",
+      |     ...<2 lines>...
+      |         outputSchema.get("$defs", {}),
+      |     )
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 251, in get_model_fields
+      |     python_type_hint, pydantic_field_info = _process_schema_property(
+      |                                             ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 219, in _process_schema_property
+      |     item_type_hint, _ = _process_schema_property(
+      |                         ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 121, in _process_schema_property
+      |     assert ref in schema_defs, "Custom field not found"
+      |            ^^^^^^^^^^^^^^^^^^
+      | AssertionError: Custom field not found
+      +------------------------------------
+
+ERROR:    Application startup failed. Exiting.
+2025-10-25 09:56:47,294 - WARNING - Server task exited unexpectedly. Initiating shutdown.
+2025-10-25 09:56:47,294 - INFO - Initiating server shutdown...
+2025-10-25 09:56:47,294 - INFO - Server shutdown complete
+2025-10-25 17:40:36,015 - INFO - Starting MCPO Server...
+2025-10-25 17:40:36,016 - INFO -   Name: MCP OpenAPI Proxy
+2025-10-25 17:40:36,016 - INFO -   Version: 1.0
+2025-10-25 17:40:36,016 - INFO -   Description: Automatically generated API from MCP Tool Schemas
+2025-10-25 17:40:36,016 - INFO -   Hostname: Matthiass-MacBook-Air.local
+2025-10-25 17:40:36,016 - INFO -   Port: 9000
+2025-10-25 17:40:36,016 - INFO -   API Key: Provided
+2025-10-25 17:40:36,016 - INFO -   CORS Allowed Origins: ['*']
+2025-10-25 17:40:36,016 - INFO -   Path Prefix: /
+2025-10-25 17:40:36,016 - INFO -   Root Path: 
+2025-10-25 17:40:36,016 - INFO - Configuring for a single StreamableHTTP MCP Server with URL http://127.0.0.1:3338/mcp
+2025-10-25 17:40:36,016 - INFO - Uvicorn server starting...
+INFO:     Started server process [6333]
+INFO:     Waiting for application startup.
+2025-10-25 17:40:36,128 - INFO - HTTP Request: POST http://127.0.0.1:3338/mcp "HTTP/1.1 200 OK"
+2025-10-25 17:40:36,128 - INFO - Received session ID: 806a5cf7-ca26-441a-b945-9a793768256e
+2025-10-25 17:40:36,130 - INFO - Negotiated protocol version: 2025-06-18
+2025-10-25 17:40:36,134 - INFO - HTTP Request: POST http://127.0.0.1:3338/mcp "HTTP/1.1 202 Accepted"
+2025-10-25 17:40:36,135 - INFO - HTTP Request: GET http://127.0.0.1:3338/mcp "HTTP/1.1 200 OK"
+2025-10-25 17:40:36,143 - INFO - HTTP Request: POST http://127.0.0.1:3338/mcp "HTTP/1.1 200 OK"
+2025-10-25 17:40:36,169 - INFO - HTTP Request: DELETE http://127.0.0.1:3338/mcp "HTTP/1.1 200 OK"
+2025-10-25 17:40:36,169 - ERROR - Failed to connect to MCP server 'messages-app-mcp': ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 567, in lifespan
+  |     async with client_context as (reader, writer, *_):
+  |                ^^^^^^^^^^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 235, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 478, in streamablehttp_client
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Exception Group Traceback (most recent call last):
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 502, in streamablehttp_client
+    |     yield (
+    |     ...<3 lines>...
+    |     )
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 568, in lifespan
+    |     async with ClientSession(reader, writer) as session:
+    |                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/shared/session.py", line 218, in __aexit__
+    |     return await self._task_group.__aexit__(exc_type, exc_val, exc_tb)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+    |     raise BaseExceptionGroup(
+    |         "unhandled errors in a TaskGroup", self._exceptions
+    |     ) from None
+    | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+    +-+---------------- 1 ----------------
+      | Traceback (most recent call last):
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 570, in lifespan
+      |     await create_dynamic_endpoints(app, api_dependency=api_dependency)
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 390, in create_dynamic_endpoints
+      |     response_model_fields = get_model_fields(
+      |         f"{endpoint_name}_response_model",
+      |     ...<2 lines>...
+      |         outputSchema.get("$defs", {}),
+      |     )
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 251, in get_model_fields
+      |     python_type_hint, pydantic_field_info = _process_schema_property(
+      |                                             ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 219, in _process_schema_property
+      |     item_type_hint, _ = _process_schema_property(
+      |                         ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 121, in _process_schema_property
+      |     assert ref in schema_defs, "Custom field not found"
+      |            ^^^^^^^^^^^^^^^^^^
+      | AssertionError: Custom field not found
+      +------------------------------------
+ERROR:      + Exception Group Traceback (most recent call last):
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/starlette/routing.py", line 694, in lifespan
+  |     async with self.lifespan_context(app) as maybe_state:
+  |                ~~~~~~~~~~~~~~~~~~~~~^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 214, in __aenter__
+  |     return await anext(self.gen)
+  |            ^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 567, in lifespan
+  |     async with client_context as (reader, writer, *_):
+  |                ^^^^^^^^^^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 235, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 478, in streamablehttp_client
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Exception Group Traceback (most recent call last):
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 502, in streamablehttp_client
+    |     yield (
+    |     ...<3 lines>...
+    |     )
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 568, in lifespan
+    |     async with ClientSession(reader, writer) as session:
+    |                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/shared/session.py", line 218, in __aexit__
+    |     return await self._task_group.__aexit__(exc_type, exc_val, exc_tb)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+    |     raise BaseExceptionGroup(
+    |         "unhandled errors in a TaskGroup", self._exceptions
+    |     ) from None
+    | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+    +-+---------------- 1 ----------------
+      | Traceback (most recent call last):
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 570, in lifespan
+      |     await create_dynamic_endpoints(app, api_dependency=api_dependency)
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 390, in create_dynamic_endpoints
+      |     response_model_fields = get_model_fields(
+      |         f"{endpoint_name}_response_model",
+      |     ...<2 lines>...
+      |         outputSchema.get("$defs", {}),
+      |     )
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 251, in get_model_fields
+      |     python_type_hint, pydantic_field_info = _process_schema_property(
+      |                                             ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 219, in _process_schema_property
+      |     item_type_hint, _ = _process_schema_property(
+      |                         ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 121, in _process_schema_property
+      |     assert ref in schema_defs, "Custom field not found"
+      |            ^^^^^^^^^^^^^^^^^^
+      | AssertionError: Custom field not found
+      +------------------------------------
+
+ERROR:    Application startup failed. Exiting.
+2025-10-25 17:40:36,179 - WARNING - Server task exited unexpectedly. Initiating shutdown.
+2025-10-25 17:40:36,179 - INFO - Initiating server shutdown...
+2025-10-25 17:40:36,179 - INFO - Server shutdown complete
+2025-10-25 18:31:14,591 - INFO - Starting MCPO Server...
+2025-10-25 18:31:14,591 - INFO -   Name: MCP OpenAPI Proxy
+2025-10-25 18:31:14,591 - INFO -   Version: 1.0
+2025-10-25 18:31:14,591 - INFO -   Description: Automatically generated API from MCP Tool Schemas
+2025-10-25 18:31:14,591 - INFO -   Hostname: mac.lan
+2025-10-25 18:31:14,591 - INFO -   Port: 9000
+2025-10-25 18:31:14,591 - INFO -   API Key: Provided
+2025-10-25 18:31:14,591 - INFO -   CORS Allowed Origins: ['*']
+2025-10-25 18:31:14,591 - INFO -   Path Prefix: /
+2025-10-25 18:31:14,591 - INFO -   Root Path: 
+2025-10-25 18:31:14,591 - INFO - Configuring for a single StreamableHTTP MCP Server with URL http://127.0.0.1:3338/mcp
+2025-10-25 18:31:14,591 - INFO - Uvicorn server starting...
+INFO:     Started server process [9611]
+INFO:     Waiting for application startup.
+2025-10-25 18:31:14,649 - INFO - HTTP Request: POST http://127.0.0.1:3338/mcp "HTTP/1.1 200 OK"
+2025-10-25 18:31:14,649 - INFO - Received session ID: bf0c61c6-6dd2-4994-a319-d8a9043fe18d
+2025-10-25 18:31:14,650 - INFO - Negotiated protocol version: 2025-06-18
+2025-10-25 18:31:14,653 - INFO - HTTP Request: POST http://127.0.0.1:3338/mcp "HTTP/1.1 202 Accepted"
+2025-10-25 18:31:14,653 - INFO - HTTP Request: GET http://127.0.0.1:3338/mcp "HTTP/1.1 200 OK"
+2025-10-25 18:31:14,660 - INFO - HTTP Request: POST http://127.0.0.1:3338/mcp "HTTP/1.1 200 OK"
+2025-10-25 18:31:14,677 - INFO - HTTP Request: DELETE http://127.0.0.1:3338/mcp "HTTP/1.1 200 OK"
+2025-10-25 18:31:14,677 - ERROR - Failed to connect to MCP server 'messages-app-mcp': ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 567, in lifespan
+  |     async with client_context as (reader, writer, *_):
+  |                ^^^^^^^^^^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 235, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 478, in streamablehttp_client
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Exception Group Traceback (most recent call last):
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 502, in streamablehttp_client
+    |     yield (
+    |     ...<3 lines>...
+    |     )
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 568, in lifespan
+    |     async with ClientSession(reader, writer) as session:
+    |                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/shared/session.py", line 218, in __aexit__
+    |     return await self._task_group.__aexit__(exc_type, exc_val, exc_tb)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+    |     raise BaseExceptionGroup(
+    |         "unhandled errors in a TaskGroup", self._exceptions
+    |     ) from None
+    | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+    +-+---------------- 1 ----------------
+      | Traceback (most recent call last):
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 570, in lifespan
+      |     await create_dynamic_endpoints(app, api_dependency=api_dependency)
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 390, in create_dynamic_endpoints
+      |     response_model_fields = get_model_fields(
+      |         f"{endpoint_name}_response_model",
+      |     ...<2 lines>...
+      |         outputSchema.get("$defs", {}),
+      |     )
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 251, in get_model_fields
+      |     python_type_hint, pydantic_field_info = _process_schema_property(
+      |                                             ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 219, in _process_schema_property
+      |     item_type_hint, _ = _process_schema_property(
+      |                         ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 121, in _process_schema_property
+      |     assert ref in schema_defs, "Custom field not found"
+      |            ^^^^^^^^^^^^^^^^^^
+      | AssertionError: Custom field not found
+      +------------------------------------
+ERROR:      + Exception Group Traceback (most recent call last):
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/starlette/routing.py", line 694, in lifespan
+  |     async with self.lifespan_context(app) as maybe_state:
+  |                ~~~~~~~~~~~~~~~~~~~~~^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 214, in __aenter__
+  |     return await anext(self.gen)
+  |            ^^^^^^^^^^^^^^^^^^^^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 567, in lifespan
+  |     async with client_context as (reader, writer, *_):
+  |                ^^^^^^^^^^^^^^
+  |   File "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/contextlib.py", line 235, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 478, in streamablehttp_client
+  |     async with anyio.create_task_group() as tg:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Exception Group Traceback (most recent call last):
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/client/streamable_http.py", line 502, in streamablehttp_client
+    |     yield (
+    |     ...<3 lines>...
+    |     )
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 568, in lifespan
+    |     async with ClientSession(reader, writer) as session:
+    |                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcp/shared/session.py", line 218, in __aexit__
+    |     return await self._task_group.__aexit__(exc_type, exc_val, exc_tb)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 781, in __aexit__
+    |     raise BaseExceptionGroup(
+    |         "unhandled errors in a TaskGroup", self._exceptions
+    |     ) from None
+    | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+    +-+---------------- 1 ----------------
+      | Traceback (most recent call last):
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 570, in lifespan
+      |     await create_dynamic_endpoints(app, api_dependency=api_dependency)
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/main.py", line 390, in create_dynamic_endpoints
+      |     response_model_fields = get_model_fields(
+      |         f"{endpoint_name}_response_model",
+      |     ...<2 lines>...
+      |         outputSchema.get("$defs", {}),
+      |     )
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 251, in get_model_fields
+      |     python_type_hint, pydantic_field_info = _process_schema_property(
+      |                                             ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 219, in _process_schema_property
+      |     item_type_hint, _ = _process_schema_property(
+      |                         ~~~~~~~~~~~~~~~~~~~~~~~~^
+      |         _model_cache,
+      |         ^^^^^^^^^^^^^
+      |     ...<4 lines>...
+      |         schema_defs,
+      |         ^^^^^^^^^^^^
+      |     )
+      |     ^
+      |   File "/Users/matthias/.local/pipx/venvs/mcpo/lib/python3.13/site-packages/mcpo/utils/main.py", line 121, in _process_schema_property
+      |     assert ref in schema_defs, "Custom field not found"
+      |            ^^^^^^^^^^^^^^^^^^
+      | AssertionError: Custom field not found
+      +------------------------------------
+
+ERROR:    Application startup failed. Exiting.
+2025-10-25 18:31:14,685 - WARNING - Server task exited unexpectedly. Initiating shutdown.
+2025-10-25 18:31:14,685 - INFO - Initiating server shutdown...
+2025-10-25 18:31:14,685 - INFO - Server shutdown complete

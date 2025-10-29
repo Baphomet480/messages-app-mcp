@@ -61,6 +61,10 @@ Helper scripts:
 
 - `pnpm run send -- "+1XXXXXXXXXX" "Hello"` – send a quick test message.
 - `pnpm run doctor` / `pnpm run doctor -- --json` – verify prerequisites.
+- Shell helpers in `scripts/` (useful outside pnpm):
+  - `scripts/mcp-stack.sh` – orchestrate the HTTP server plus an optional `mcpo` proxy (`start|stop|status|watch`). Defaults align to port 3338; override with `MESSAGES_MCP_PORT`.
+  - Deprecated shims: `mcp-http-start.sh`, `mcp-http-stop.sh`, `mcp-http-watch.sh` now forward to `mcp-stack.sh` to keep older workflows working. Prefer `mcp-stack.sh` directly.
+  - `scripts/mcp-stack.sh` – orchestrate the HTTP server plus an optional `mcpo` proxy (`start|stop|status|watch`). Defaults align to port 3338; override with `MESSAGES_MCP_PORT`.
 
 ### Install via pnpm
 
@@ -199,6 +203,7 @@ Logs note every `send_text` / `send_attachment` attempt (masked recipients), eac
 - `MESSAGES_MCP_SEGMENT_WARNING=10` – emit `payload_warning` when a text spans more than this many segments (set to `0` to disable).
 - `MESSAGES_MCP_MASK_RECIPIENTS=true` – mask phone numbers/emails in responses.
 - `MESSAGES_MCP_HTTP_*` – configure optional Streamable HTTP transport (`PORT`, `HOST`, `ENABLE_SSE`, `CORS_ORIGINS`, etc.).
+  - `MESSAGES_MCP_HTTP_ALLOWED_HOSTS` – comma‑separated host allowlist for DNS‑rebinding protection. The server rejects requests whose `Host` header is not in this list (normalized with the runtime port). Defaults include `127.0.0.1`, `localhost`, and `[::1]` when binding to all interfaces. Add any custom names you use over SSH tunnels (see below).
 - `MESSAGES_MCP_LOG_VIEWER=true` – toggle the built-in browser log viewer. When enabled the agent opens a single local tab with live log streaming and a shutdown button.
 - `MESSAGES_MCP_LOG_VIEWER_AUTO_OPEN=true` – disable to start the viewer server without automatically launching a browser tab.
 - `MESSAGES_MCP_LOG_VIEWER_MAX_CHUNK=262144` – override the maximum number of bytes returned per log poll (default ~256&nbsp;KiB).
@@ -235,6 +240,61 @@ Optional knobs:
 - `MESSAGES_MCP_HTTP_OIDC_IDP_LOGOUT` – set `true` to propagate logout to the identity provider when calling `/logout`.
 
 Behind an HTTPS reverse proxy, expose `/mcp` (and `/login`, `/callback`, `/logout`) publicly, force TLS at the proxy, and ensure cookies are preserved end-to-end. The guard skips CORS pre-flight OPTIONS requests, so browsers can still negotiate HTTP transports.
+
+### SSH tunnels and allowed hosts
+
+When you access the HTTP transport through an SSH tunnel, the HTTP `Host` header comes from the URL you use in the client (e.g., `127.0.0.1:3338` or `localhost:3338`). Shell alias names (like `pito`) do not affect the Host header. With DNS‑rebinding protection enabled, only the Host values matter.
+
+- Quick start (already wired in `pnpm start:http`):
+
+  ```bash
+  # Allows 127.0.0.1, localhost, and ::1
+  pnpm run start:http
+  ```
+
+- Custom run (choose your own names):
+
+  ```bash
+  MESSAGES_MCP_HTTP_ALLOWED_HOSTS=127.0.0.1,localhost,my-alias \
+  node dist/index.js --http --host 127.0.0.1 --port 3338 --enable-sse
+  ```
+
+- Or via JSON config (`messages-mcp.config.json` in CWD or `~/.config/`):
+
+  ```json
+  {
+    "transport": "http",
+    "http": {
+      "host": "127.0.0.1",
+      "port": 3338,
+      "allowedHosts": ["127.0.0.1", "localhost", "::1"]
+    }
+  }
+  ```
+
+If you prefer CLI flags instead of env/config, you can append `--allowed-host <name>` for any additional hostname you actually use in the URL (e.g., a reverse‑tunnel domain). All values are normalized to include the active port at runtime.
+
+Examples:
+- Local forward: `ssh -N -L 3338:127.0.0.1:3338 my-host` → connect to `http://127.0.0.1:3338` (already allowed).
+- Reverse forward: `ssh -N -R 3338:127.0.0.1:3338 my-host` → if you browse from the remote side as `http://my-host:3338`, add `my-host` to `allowedHosts`.
+
+### Pitolandia tunnel status (helper)
+
+This repo ships a small script that reports the health of the reverse SSH tunnel used to expose the local MCP server to `ssh.pitolandia.com`.
+
+```
+scripts/pitolandia-tunnel-status.sh           # human-readable summary
+scripts/pitolandia-tunnel-status.sh --one-line  # OK / DEGRADED / DOWN + notes
+scripts/pitolandia-tunnel-status.sh --json      # machine-readable
+```
+
+It checks:
+- LaunchAgent `com.pitolandia.tunnel` (loaded and PID)
+- `autossh` presence on the Mac
+- Remote listener on `127.0.0.1:3338`
+- Local and remote `http://127.0.0.1:3338/mcp/manifest`
+
+Exit codes: `0` OK, `1` degraded, `2` down. The remote manifest probe requires `curl` or `wget` on the server.
 
 ## Versioning & Support
 

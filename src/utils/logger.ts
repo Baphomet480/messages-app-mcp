@@ -103,6 +103,10 @@ class RotatingFileLogger {
     this.write("DEBUG", args);
   }
 
+  getFilePath(): string {
+    return this.filePath;
+  }
+
   private write(level: LogLevel, args: unknown[]): void {
     const line = formatLogLine(level, args);
     if (this.options.consolePassThrough) {
@@ -184,6 +188,10 @@ export function getLogger(options?: LoggerOptions) {
     sharedLogger = new RotatingFileLogger(options);
   }
   return sharedLogger;
+}
+
+export function getLogFilePath(): string {
+  return getLogger().getFilePath();
 }
 
 // Exposed for unit tests to isolate logger state.

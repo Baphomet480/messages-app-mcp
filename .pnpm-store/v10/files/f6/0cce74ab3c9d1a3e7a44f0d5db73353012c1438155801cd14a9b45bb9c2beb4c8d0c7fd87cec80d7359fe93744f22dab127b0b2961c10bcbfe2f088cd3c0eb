@@ -1,0 +1,55 @@
+{
+  "name": "imessage-parser",
+  "version": "0.1.0",
+  "description": "Parse iMessage chat.db attributedBody NSAttributedString format in Node.js",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "bin": {
+    "imessage-parser": "./lib/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "lint": "eslint src --ext .ts",
+    "prepare": "npm run build",
+    "cli": "node lib/cli.js"
+  },
+  "keywords": [
+    "imessage",
+    "macos",
+    "messages",
+    "chat.db",
+    "attributedBody",
+    "NSAttributedString",
+    "parser"
+  ],
+  "author": "Alex K. Wolfe",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "jest": "^29.5.0",
+    "ts-jest": "^29.1.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "commander": "^11.0.0",
+    "sqlite3": "^5.1.6"
+  },
+  "files": [
+    "lib/**/*"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alexkwolfe/imessage-parser.git"
+  },
+  "bugs": {
+    "url": "https://github.com/alexkwolfe/imessage-parser/issues"
+  },
+  "homepage": "https://github.com/alexkwolfe/imessage-parser#readme"
+}
