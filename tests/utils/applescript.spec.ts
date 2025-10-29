@@ -5,7 +5,7 @@ const defaultExecImplementation: (typeof import("node:child_process"))['execFile
   if (typeof options === "function") {
     callback = options;
   }
-  callback?.(null, Buffer.from("ok"), Buffer.from(""));
+  callback?.(null, Buffer.from("imessage"), Buffer.from(""));
   return {} as any;
 }) as any;
 
@@ -64,31 +64,27 @@ describe("sendMessageAppleScript", () => {
     );
   });
 
-  it("invokes osascript with recipient mode for string targets", async () => {
+  it("invokes fallback script for recipient targets and returns route", async () => {
     mkdtempMock.mockResolvedValueOnce("/tmp/messages-mcp-123");
-    mkdtempMock.mockResolvedValueOnce("/tmp/messages-mcp-script");
-    await sendMessageAppleScript("  +15550000000  ", " Hello there ");
+    const result = await sendMessageAppleScript("  +15550000000  ", " Hello there ");
 
+    expect(result.route).toBe("imessage");
     expect(execFileMock).toHaveBeenCalledTimes(1);
     const [cmd, args] = execFileMock.mock.calls[0]!;
     expect(cmd).toBe("/usr/bin/osascript");
-    expect(args[0]).toMatch(/\/tmp\/messages-mcp-script\/script\.applescript$/);
-    expect(args.slice(-4)).toEqual(["text_path", "recipient", "+15550000000", "/tmp/messages-mcp-123/body.txt"]);
+    const argv = Array.isArray(args) ? args : [];
+    expect(argv[0]).toMatch(/scripts\/applescript\/send_message\.applescript$/);
+    expect(argv[1]).toBe("+15550000000");
+    expect(argv[2]).toBe("/tmp/messages-mcp-123/body.txt");
 
-    expect(writeFileMock).toHaveBeenNthCalledWith(
-      1,
+    expect(writeFileMock).toHaveBeenCalledTimes(1);
+    expect(writeFileMock).toHaveBeenCalledWith(
       "/tmp/messages-mcp-123/body.txt",
       " Hello there ",
       { encoding: "utf8" },
     );
-    expect(writeFileMock).toHaveBeenNthCalledWith(
-      2,
-      "/tmp/messages-mcp-script/script.applescript",
-      expect.stringContaining("on run argv"),
-      { encoding: "utf8" },
-    );
 
-    expect(rmMock).toHaveBeenCalledWith("/tmp/messages-mcp-script", { recursive: true, force: true });
+    expect(rmMock).toHaveBeenCalledTimes(1);
     expect(rmMock).toHaveBeenCalledWith("/tmp/messages-mcp-123", { recursive: true, force: true });
   });
 
@@ -102,6 +98,19 @@ describe("sendMessageAppleScript", () => {
     const callArgs = execFileMock.mock.calls[0]!;
     const args = callArgs[1] as string[];
     expect(args.slice(-4)).toEqual(["text_path", "chat", "chat123", "/tmp/messages-mcp-456/body.txt"]);
+  });
+
+  it("surfaces sms route when fallback script returns sms", async () => {
+    mkdtempMock.mockResolvedValueOnce("/tmp/messages-mcp-789");
+    execFileMock.mockImplementationOnce((cmd: any, args: any, options: any, callback: any) => {
+      if (typeof options === "function") {
+        callback = options;
+      }
+      callback?.(null, Buffer.from("sms"), Buffer.from(""));
+      return {} as any;
+    });
+    const result = await sendMessageAppleScript("+15551231212", "fallback check");
+    expect(result.route).toBe("sms");
   });
 });
 

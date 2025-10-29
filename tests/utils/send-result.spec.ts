@@ -49,12 +49,13 @@ describe("buildSendSuccessPayload", () => {
       { from_me: true, unix_ms: 1_000, text: "hello" },
       { from_me: false, unix_ms: 1_500, text: "hi" },
     ];
-    const payload = buildSendSuccessPayload({ target, chatId: 42, messages });
+    const payload = buildSendSuccessPayload({ target, chatId: 42, messages, route: "imessage" });
     expect(payload.status).toBe("sent");
     expect(payload.summary).toContain("+15551231234");
     expect(payload.chat_id).toBe(42);
     expect(payload.latest_message?.text).toBe("hello");
     expect(payload.recent_messages?.map((m) => m.text)).toEqual(["hi", "hello"]);
+    expect(payload.route).toBe("imessage");
   });
 
   it("omits optional fields when data missing", () => {

@@ -41,7 +41,8 @@
     "dist",
     "LICENSE",
     "README.md",
-    "scripts/ai-search.swift"
+    "scripts/ai-search.swift",
+    "scripts/applescript"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.20.2",

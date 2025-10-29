@@ -9430,3 +9430,28 @@ RangeError: Maximum call stack size exceeded
   submitted_segment_encoding: 'ucs-2',
   payload_warning: null
 }
+Exception in PromiseRejectCallback:
+file:///Users/matthias/github/messages-app-mcp/node_modules/.pnpm/@modelcontextprotocol+sdk@1.20.2/node_modules/@modelcontextprotocol/sdk/dist/esm/server/streamableHttp.js:536
+    }
+    ^
+
+RangeError: Maximum call stack size exceeded
+
+Exception in PromiseRejectCallback:
+file:///Users/matthias/github/messages-app-mcp/node_modules/.pnpm/@modelcontextprotocol+sdk@1.20.2/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/protocol.js:236
+        await ((_a = this._transport) === null || _a === void 0 ? void 0 : _a.close());
+                                                                              ^
+
+RangeError: Maximum call stack size exceeded
+
+[info] send_text success {
+  target: '+14805788164',
+  recipient: '+•••••••8164',
+  chat_id: 60,
+  message_preview: 'Heads up from Pitolandia dev: just refreshed the site header (new gradient shell, CTA stack, latest guide link, real Lo…',
+  latest_message_id: 189032,
+  lookup_error: null,
+  submitted_segment_count: 4,
+  submitted_segment_encoding: 'ucs-2',
+  payload_warning: null
+}

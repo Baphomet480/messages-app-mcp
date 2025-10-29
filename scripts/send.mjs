@@ -74,8 +74,10 @@ async function main() {
   }
 
   try {
-    await sendMessageAppleScript({ recipient }, text)
-    console.log(`Sent to ${mask ? maskRecipient(recipient) : recipient}.`)
+    const result = await sendMessageAppleScript({ recipient }, text)
+    const route = result && typeof result.route === 'string' ? result.route : null
+    const routeLabel = route ? ` via ${route.toUpperCase()}` : ''
+    console.log(`Sent to ${mask ? maskRecipient(recipient) : recipient}${routeLabel}.`)
   } catch (e) {
     console.error(`Failed to send to ${mask ? maskRecipient(recipient) : recipient}. ${cleanOsaError(e)}`)
     process.exit(1)

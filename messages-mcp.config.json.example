@@ -1,0 +1,17 @@
+{
+  "//": "Sample configuration for messages-app-mcp. Copy to messages-mcp.config.json and adjust as needed.",
+  "transport": "stdio",
+  "http": {
+    "host": "127.0.0.1",
+    "port": 3338,
+    "enableSseFallback": true,
+    "corsOrigins": ["http://localhost:3338"],
+    "dnsRebindingProtection": true,
+    "allowedHosts": ["127.0.0.1", "localhost"]
+  },
+  "logViewer": {
+    "enabled": true,
+    "autoOpen": true,
+    "pollIntervalMs": 2000
+  }
+}

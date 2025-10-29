@@ -1,6 +1,7 @@
 # Messages.app MCP Server
 
 [![CI](https://github.com/Baphomet480/messages-app-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Baphomet480/messages-app-mcp/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Baphomet480/messages-app-mcp/actions/workflows/codeql.yml/badge.svg)](https://github.com/Baphomet480/messages-app-mcp/actions/workflows/codeql.yml)
 [![npm](https://img.shields.io/npm/v/messages-app-mcp.svg)](https://www.npmjs.com/package/messages-app-mcp)
 
 A Model Context Protocol (MCP) server that lets AI assistants interact with macOS Messages.app—listing chats, reading conversation history (read only), and sending new iMessage/SMS content on demand.
@@ -16,6 +17,7 @@ A Model Context Protocol (MCP) server that lets AI assistants interact with macO
 - [Versioning & Support](#versioning--support)
 - [Development](#development)
 - [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
 - [Release Process](#release-process)
 - [Security Notes](#security-notes)
 - [Contributing](#contributing)
@@ -31,10 +33,11 @@ A Model Context Protocol (MCP) server that lets AI assistants interact with macO
 
 - Enumerate recent chats with unread counts that work across macOS schema changes.
 - Fetch recent messages by chat, participant, or focused context windows with normalized timestamps/metadata.
-- Send messages and attachments while receiving structured JSON responses that include delivery summaries and recent history.
+- Send messages and attachments while receiving structured JSON responses that include delivery summaries, delivery routes, and recent history.
 - Full-text search with optional scoping and attachment hints.
 - Rotating structured logs (repo-local by default) that capture search queries, send outcomes, and errors.
 - Diagnostics via `doctor` and version metadata via the `about` tool.
+- Optional contact enrichment through Contacts.app (enable with `MESSAGES_MCP_CONTACTS=1`).
 
 ## Requirements
 
@@ -64,7 +67,13 @@ Helper scripts:
 - Shell helpers in `scripts/` (useful outside pnpm):
   - `scripts/mcp-stack.sh` – orchestrate the HTTP server plus an optional `mcpo` proxy (`start|stop|status|watch`). Defaults align to port 3338; override with `MESSAGES_MCP_PORT`.
   - Deprecated shims: `mcp-http-start.sh`, `mcp-http-stop.sh`, `mcp-http-watch.sh` now forward to `mcp-stack.sh` to keep older workflows working. Prefer `mcp-stack.sh` directly.
-  - `scripts/mcp-stack.sh` – orchestrate the HTTP server plus an optional `mcpo` proxy (`start|stop|status|watch`). Defaults align to port 3338; override with `MESSAGES_MCP_PORT`.
+
+### Which transport should I use?
+
+| Mode | When it shines | Notes |
+| ---- | --------------- | ----- |
+| `stdio` (default) | Local Codex CLI launches the server on demand. Simple auth story and fastest iteration loop. | Configure via `transport: "stdio"` (or omit the key). stdout stays pure JSON while stderr + rotating files capture logs. |
+| Streamable HTTP + SSE | Need persistent resources (`messages://inbox`, `messages://conversation/...`) or want to front the server with an authenticated proxy. | Enable with `transport: "http"` or `pnpm run start:http`. Lock down `MESSAGES_MCP_HTTP_ALLOWED_HOSTS` and review the example config for sane defaults. |
 
 ### Install via pnpm
 
@@ -86,13 +95,14 @@ The binary published on npm (installable via pnpm) is identical to `dist/index.j
 | Tool | Description | Notes |
 | ---- | ----------- | ----- |
 | `about` | Returns version/build metadata, repository links, and runtime environment info. | Surface this in clients to confirm the deployed build. |
-| `list_chats` | Lists recent chats with participants, unread counts, and last-activity timestamps (Apple epoch converted to UNIX/ISO). | Supports filters: `limit`, `participant`, `updated_after_unix_ms`, `unread_only`. |
+| `list_chats` | Lists recent chats with participants, unread counts, and last-activity timestamps (Apple epoch converted to UNIX/ISO). | Adds `participant_names[]` (contact display names when enabled) plus `effective_display_name` fallback. Filters: `limit`, `participant`, `updated_after_unix_ms`, `unread_only`. |
 | `get_messages` | Retrieves normalized message rows by `chat_id` or `participant`, optionally with contextual windows and attachment metadata. | Structured payload includes ISO timestamps, message types, and optional context bundle. |
 | `recent_messages_by_participant` | Returns the most recent normalized messages for a participant handle (phone or email). | Use when you want the latest conversation history without providing a text query. |
 | `history_by_days` | Fetches recent history for a chat or participant over a fixed number of days without requiring a text query. | Supply `chat_id` or `participant`, plus `days_back` (default 30) and `limit` (default 100). |
-| `send_text` | Sends text to a recipient/chat and returns a single-envelope JSON result with `ok`, `summary`, target, recent messages, and the original payload/segment metadata. | Honors `MESSAGES_MCP_READONLY`; always returns the same envelope shape with `ok: false` on failure. |
+| `send_text` | Sends text to a recipient/chat and returns a single-envelope JSON result with `ok`, `summary`, `route`, target, recent messages, and the original payload/segment metadata. | Automatically falls back to SMS when iMessage delivery fails; `route` reflects the channel (`imessage` or `sms`). Honors `MESSAGES_MCP_READONLY`. |
 | `send_attachment` | Sends a file (with optional caption) using the same targeting options as `send_text`. | Same envelope as `send_text`, with an optional `attachment` field. |
-| `search_messages` / `search_messages_safe` | Full-text search plus scoped recency filters. | Safe variant enforces `days_back ≤ 365`; switch to `search_messages` for longer ranges or explicit Unix timestamps. |
+| `search_messages` / `search_messages_safe` | Full-text search plus scoped recency filters. | Safe variant enforces `days_back ≤ 365` (configurable default via `MESSAGES_MCP_DEFAULT_DAYS_BACK`, `MESSAGES_MCP_SEARCH_LIMIT_MAX`). |
+| `search_contacts` | Looks up macOS Contacts entries by name, phone number, or email. | Enabled by default; set `MESSAGES_MCP_CONTACTS=0` to opt out. Returns `{ contacts: [{ name, phones[], emails[] }] }`. |
 | `context_around_message` | Fetches a window of normalized messages around an anchor `message_rowid`. | Useful for tools that need surrounding context without large history fetches. |
 | `summarize_window` | Summarize a window of messages around an anchor rowid with participant counts and trimmed lines. | Helpful for quick recap responses without fetching full history. |
 | `get_attachments` | Resolves attachment metadata (names, MIME types, byte sizes, resolved paths) with strict per-message caps. | Always read-only. |
@@ -210,6 +220,10 @@ Logs note every `send_text` / `send_attachment` attempt (masked recipients), eac
 - `MESSAGES_MCP_OSASCRIPT_MODE=file` – controls how AppleScript is invoked. The default (`file`) writes the script to a temporary `.applescript` file before calling `/usr/bin/osascript`, avoiding inline parsing quirks. Set to `inline` to revert to the legacy `-l AppleScript -e` behaviour.
 - `MESSAGES_MCP_HTTP_OIDC_*` – enable OAuth/OIDC protection for the HTTP transport. See [OAuth guard](#oauth-guard) for the full matrix.
 - Optional JSON config: place `messages-mcp.config.json` in the current directory (or point `MESSAGES_MCP_CONFIG` at a file). We also check `~/.config/messages-mcp.config.json`. Values in the config provide defaults for the same knobs as the environment variables (env/CLI still win).
+- A commented template lives at [`messages-mcp.config.json.example`](./messages-mcp.config.json.example); copy it next to your deployment and trim the `//` key once you are ready.
+- `MESSAGES_MCP_CONTACTS=0` – opt out of contact enrichment. By default `list_chats` annotates participants with contact names and the `search_contacts` tool is available.
+- `MESSAGES_MCP_DEFAULT_DAYS_BACK=30` and `MESSAGES_MCP_SEARCH_LIMIT_MAX=200` – redefine the default window and hard limit for `search_messages_safe`. Useful when agents should narrow searches to smaller slices (e.g., 14 days/100 results).
+- `MESSAGES_MCP_DB_DRIVER=better-sqlite` – experimental flag that swaps in the future BetterSqlite-backed store. For now this emits a helpful error; leave it unset (CLI driver) in production.
 - `MESSAGES_MCP_CONNECTOR_DAYS_BACK=365`, `MESSAGES_MCP_CONNECTOR_LIMIT=20` – adjust defaults for the connector-facing `search`/`fetch` tools.
 - `MESSAGES_MCP_CONNECTOR_CONTACT`, `MESSAGES_MCP_CONNECTOR_DOCS_URL`, `MESSAGES_MCP_CONNECTOR_PRIVACY_URL`, `MESSAGES_MCP_CONNECTOR_TOS_URL` – override contact/legal metadata surfaced from `/mcp/manifest` for OpenAI connectors and other registries.
 - `MESSAGES_MCP_INBOX_RESOURCE_LIMIT=15` – cap the number of conversations returned by the inbox resource (bounds 5–50).
@@ -317,6 +331,13 @@ Exit codes: `0` OK, `1` degraded, `2` down. The remote manifest probe requires `
 - Focus tests on edge cases: mixed chat schemas, Apple epoch conversions, structured response shapes.
 - CI (GitHub Actions, macOS) runs install → test → build → doctor; keep workflows green before cutting a release.
 
+## Troubleshooting
+
+- **Full Disk Access** – If queries fail with `SQLITE_CANTOPEN` or `doctor` reports permission errors, re-check **System Settings → Privacy & Security → Full Disk Access** and add your terminal/agent runner.
+- **Automation prompts** – The first send on a new host triggers macOS automation prompts for Messages.app. Approve them; otherwise AppleScript calls will error with “Not authorised to send Apple events”.
+- **Contacts enrichment** – `list_chats` only includes `participant_names` when `MESSAGES_MCP_CONTACTS=1` and macOS granted Contacts access. Flip the flag, restart, and accept the Contacts permission dialog when it appears.
+- **Large searches** – Tighten `search_messages_safe` defaults with `MESSAGES_MCP_DEFAULT_DAYS_BACK` (e.g., `14`) and cap results via `MESSAGES_MCP_SEARCH_LIMIT_MAX` to keep agents responsive.
+
 ## Release Process
 
 1. Ensure `pnpm run build` and `pnpm test` pass locally.
@@ -338,6 +359,7 @@ Both `send_text` and `send_attachment` return:
 {
   "ok": true,
   "summary": "Sent message to +1•••0000.",
+  "route": "imessage",
   "target": {
     "recipient": "+15550000000",
     "chat_guid": null,
@@ -369,6 +391,7 @@ On failure, the same shape is returned with `ok: false` and `error` populated, w
 {
   "ok": false,
   "summary": "Failed to send to +1•••0000. Permission denied",
+  "route": null,
   "target": { "recipient": "+15550000000", "chat_guid": null, "chat_name": null, "display": "+1•••0000" },
   "error": "Permission denied"
 }
@@ -393,6 +416,21 @@ On failure, the same shape is returned with `ok: false` and `error` populated, w
 - `context_around_message`: `{ messages: [...] }`
 - `get_attachments`: `{ attachments: [...] }`
 - `search_messages`/`search_messages_safe`: `{ results: [...] }`
+- `search_contacts`: `{ contacts: [{ name, phones[], emails[] }] }`
+
+### Contact lookup
+
+Enable `MESSAGES_MCP_CONTACTS=1` to resolve phone/email handles through macOS Contacts. When active, `list_chats` gains a `participant_names[]` field and the new `search_contacts` tool returns lightweight records:
+
+```json
+{
+  "contacts": [
+    { "name": "Leia Organa", "phones": ["+15550001234"], "emails": ["leia@rebellion.example"] }
+  ]
+}
+```
+
+The first lookup prompts macOS for Contacts permission; accept it to cache entries for the process lifetime.
 
 ### Diagnostics
 

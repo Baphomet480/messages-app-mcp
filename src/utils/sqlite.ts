@@ -523,7 +523,7 @@ export type ListChatsOptions = {
   unreadOnly?: boolean;
 };
 
-export async function listChats(limit = 50, options: ListChatsOptions = {}): Promise<ChatRow[]> {
+async function listChatsCli(limit = 50, options: ListChatsOptions = {}): Promise<ChatRow[]> {
   const db = getChatDbPath();
   const hasUnreadCountColumn = await tableHasColumn(db, "chat", "unread_count");
   let unreadExpr = "COALESCE(c.unread_count, 0)";
@@ -601,7 +601,7 @@ export async function listChats(limit = 50, options: ListChatsOptions = {}): Pro
   return rows;
 }
 
-export async function getChatById(chatId: number): Promise<ChatRow | null> {
+async function getChatByIdCli(chatId: number): Promise<ChatRow | null> {
   if (!Number.isFinite(chatId) || chatId <= 0) return null;
   const db = getChatDbPath();
   const hasUnreadCountColumn = await tableHasColumn(db, "chat", "unread_count");
@@ -659,7 +659,7 @@ export async function getChatById(chatId: number): Promise<ChatRow | null> {
   return rows[0] ?? null;
 }
 
-export async function getMessagesByChatId(chatId: number, limit = 50): Promise<MessageRow[]> {
+async function getMessagesByChatIdCli(chatId: number, limit = 50): Promise<MessageRow[]> {
   const db = getChatDbPath();
   const select = await buildMessageSelect(db);
   const sql = `
@@ -676,7 +676,7 @@ export async function getMessagesByChatId(chatId: number, limit = 50): Promise<M
   return rows;
 }
 
-export async function getMessagesByParticipant(
+async function getMessagesByParticipantCli(
   participant: string,
   limit = 50,
   options: { includeAttachmentsMeta?: boolean } = {},
@@ -716,7 +716,7 @@ export async function getMessagesByParticipant(
   return rows;
 }
 
-export async function getChatIdByDisplayName(displayName: string): Promise<number | null> {
+async function getChatIdByDisplayNameCli(displayName: string): Promise<number | null> {
   const trimmed = displayName?.trim();
   if (!trimmed) return null;
   const db = getChatDbPath();
@@ -732,7 +732,7 @@ export async function getChatIdByDisplayName(displayName: string): Promise<numbe
   return value;
 }
 
-export async function getChatIdByParticipant(participant: string): Promise<number | null> {
+async function getChatIdByParticipantCli(participant: string): Promise<number | null> {
   const trimmed = participant?.trim();
   if (!trimmed) return null;
   const db = getChatDbPath();
@@ -780,7 +780,29 @@ export type SearchOptions = {
   includeAttachmentsMeta?: boolean;
 };
 
-export async function searchMessages(opts: SearchOptions): Promise<(SearchMessageRow & { attachments?: { name: string; mime: string }[] })[]> {
+export interface ChatStore {
+  listChats(limit?: number, options?: ListChatsOptions): Promise<ChatRow[]>;
+  getMessagesByChatId(chatId: number, limit?: number): Promise<MessageRow[]>;
+  getMessagesByParticipant(
+    participant: string,
+    limit?: number,
+    options?: { includeAttachmentsMeta?: boolean },
+  ): Promise<EnrichedMessageRow[]>;
+  searchMessages(opts: SearchOptions): Promise<(SearchMessageRow & { attachments?: { name: string; mime: string }[] })[]>;
+  contextAroundMessage(
+    messageRowId: number,
+    before?: number,
+    after?: number,
+    includeAttachmentsMeta?: boolean,
+  ): Promise<(MessageRow & { attachments?: { name: string; mime: string }[] })[]>;
+  getAttachmentsForMessages(messageIds: number[], perMessageCap?: number): Promise<AttachmentInfo[]>;
+  getChatById(chatId: number): Promise<ChatRow | null>;
+  getChatIdByGuid(guid: string): Promise<number | null>;
+  getChatIdByDisplayName(displayName: string): Promise<number | null>;
+  getChatIdByParticipant(participant: string): Promise<number | null>;
+}
+
+async function searchMessagesCli(opts: SearchOptions): Promise<(SearchMessageRow & { attachments?: { name: string; mime: string }[] })[]> {
   const db = getChatDbPath();
   const limit = Math.max(1, Math.min(500, opts.limit ?? 50));
   const offset = Math.max(0, opts.offset ?? 0);
@@ -897,7 +919,7 @@ export async function searchMessages(opts: SearchOptions): Promise<(SearchMessag
   return results;
 }
 
-export async function contextAroundMessage(messageRowId: number, before = 10, after = 10, includeAttachmentsMeta = false): Promise<(MessageRow & { attachments?: { name: string; mime: string }[] })[]> {
+async function contextAroundMessageCli(messageRowId: number, before = 10, after = 10, includeAttachmentsMeta = false): Promise<(MessageRow & { attachments?: { name: string; mime: string }[] })[]> {
   const db = getChatDbPath();
   const id = Math.floor(messageRowId);
   // Find chat and timestamp for the anchor message
@@ -947,7 +969,7 @@ export async function contextAroundMessage(messageRowId: number, before = 10, af
   return combined as any;
 }
 
-export async function getChatIdByGuid(guid: string): Promise<number | null> {
+async function getChatIdByGuidCli(guid: string): Promise<number | null> {
   const trimmed = guid?.trim();
   if (!trimmed) return null;
   const db = getChatDbPath();
@@ -958,7 +980,7 @@ export async function getChatIdByGuid(guid: string): Promise<number | null> {
   return value;
 }
 
-export async function getAttachmentsForMessages(messageIds: number[], perMessageCap = 5): Promise<AttachmentInfo[]> {
+async function getAttachmentsForMessagesCli(messageIds: number[], perMessageCap = 5): Promise<AttachmentInfo[]> {
   const sanitized = Array.from(new Set(messageIds.map((id) => Math.floor(id)).filter((id) => Number.isFinite(id) && id > 0)));
   if (!sanitized.length) return [];
   const cap = Math.max(1, Math.min(25, perMessageCap));
@@ -1007,4 +1029,139 @@ export async function getAttachmentsForMessages(messageIds: number[], perMessage
     total_bytes: row.total_bytes,
     created_unix_ms: appleEpochToUnixMs(row.created_date_raw),
   }));
+}
+
+const CHAT_STORE_DRIVER = (process.env.MESSAGES_MCP_DB_DRIVER ?? "cli").toLowerCase();
+
+class SqliteCliStore implements ChatStore {
+  async listChats(limit = 50, options: ListChatsOptions = {}): Promise<ChatRow[]> {
+    return listChatsCli(limit, options);
+  }
+
+  async getMessagesByChatId(chatId: number, limit = 50): Promise<MessageRow[]> {
+    return getMessagesByChatIdCli(chatId, limit);
+  }
+
+  async getMessagesByParticipant(
+    participant: string,
+    limit = 50,
+    options: { includeAttachmentsMeta?: boolean } = {},
+  ): Promise<EnrichedMessageRow[]> {
+    return getMessagesByParticipantCli(participant, limit, options);
+  }
+
+  async searchMessages(opts: SearchOptions): Promise<(SearchMessageRow & { attachments?: { name: string; mime: string }[] })[]> {
+    return searchMessagesCli(opts);
+  }
+
+  async contextAroundMessage(
+    messageRowId: number,
+    before = 10,
+    after = 10,
+    includeAttachmentsMeta = false,
+  ): Promise<(MessageRow & { attachments?: { name: string; mime: string }[] })[]> {
+    return contextAroundMessageCli(messageRowId, before, after, includeAttachmentsMeta);
+  }
+
+  async getAttachmentsForMessages(messageIds: number[], perMessageCap = 5): Promise<AttachmentInfo[]> {
+    return getAttachmentsForMessagesCli(messageIds, perMessageCap);
+  }
+
+  async getChatById(chatId: number): Promise<ChatRow | null> {
+    return getChatByIdCli(chatId);
+  }
+
+  async getChatIdByGuid(guid: string): Promise<number | null> {
+    return getChatIdByGuidCli(guid);
+  }
+
+  async getChatIdByDisplayName(displayName: string): Promise<number | null> {
+    return getChatIdByDisplayNameCli(displayName);
+  }
+
+  async getChatIdByParticipant(participant: string): Promise<number | null> {
+    return getChatIdByParticipantCli(participant);
+  }
+}
+
+class BetterSqliteStore implements ChatStore {
+  private static readonly MESSAGE =
+    "BetterSqliteStore is not yet implemented. Set MESSAGES_MCP_DB_DRIVER=cli to use the CLI driver.";
+
+  private fail(): never {
+    throw new Error(BetterSqliteStore.MESSAGE);
+  }
+
+  async listChats(): Promise<ChatRow[]> { return this.fail(); }
+  async getMessagesByChatId(): Promise<MessageRow[]> { return this.fail(); }
+  async getMessagesByParticipant(): Promise<EnrichedMessageRow[]> { return this.fail(); }
+  async searchMessages(): Promise<(SearchMessageRow & { attachments?: { name: string; mime: string }[] })[]> { return this.fail(); }
+  async contextAroundMessage(): Promise<(MessageRow & { attachments?: { name: string; mime: string }[] })[]> { return this.fail(); }
+  async getAttachmentsForMessages(): Promise<AttachmentInfo[]> { return this.fail(); }
+  async getChatById(): Promise<ChatRow | null> { return this.fail(); }
+  async getChatIdByGuid(): Promise<number | null> { return this.fail(); }
+  async getChatIdByDisplayName(): Promise<number | null> { return this.fail(); }
+  async getChatIdByParticipant(): Promise<number | null> { return this.fail(); }
+}
+
+function createChatStoreInstance(): ChatStore {
+  if (CHAT_STORE_DRIVER === "better-sqlite") {
+    return new BetterSqliteStore();
+  }
+  return new SqliteCliStore();
+}
+
+const chatStore: ChatStore = createChatStoreInstance();
+
+export function getChatStore(): ChatStore {
+  return chatStore;
+}
+
+export async function listChats(limit = 50, options: ListChatsOptions = {}): Promise<ChatRow[]> {
+  return chatStore.listChats(limit, options);
+}
+
+export async function getMessagesByChatId(chatId: number, limit = 50): Promise<MessageRow[]> {
+  return chatStore.getMessagesByChatId(chatId, limit);
+}
+
+export async function getMessagesByParticipant(
+  participant: string,
+  limit = 50,
+  options: { includeAttachmentsMeta?: boolean } = {},
+): Promise<EnrichedMessageRow[]> {
+  return chatStore.getMessagesByParticipant(participant, limit, options);
+}
+
+export async function searchMessages(opts: SearchOptions): Promise<(SearchMessageRow & { attachments?: { name: string; mime: string }[] })[]> {
+  return chatStore.searchMessages(opts);
+}
+
+export async function contextAroundMessage(
+  messageRowId: number,
+  before = 10,
+  after = 10,
+  includeAttachmentsMeta = false,
+): Promise<(MessageRow & { attachments?: { name: string; mime: string }[] })[]> {
+  return chatStore.contextAroundMessage(messageRowId, before, after, includeAttachmentsMeta);
+}
+
+export async function getAttachmentsForMessages(messageIds: number[], perMessageCap = 5): Promise<AttachmentInfo[]> {
+  return chatStore.getAttachmentsForMessages(messageIds, perMessageCap);
+}
+
+export async function getChatById(chatId: number): Promise<ChatRow | null> {
+  return chatStore.getChatById(chatId);
+}
+
+export async function getChatIdByGuid(guid: string): Promise<number | null> {
+  return chatStore.getChatIdByGuid(guid);
+}
+
+export async function getChatIdByDisplayName(displayName: string): Promise<number | null> {
+  return chatStore.getChatIdByDisplayName(displayName);
+}
+
+export async function getChatIdByParticipant(participant: string): Promise<number | null> {
+  return chatStore.getChatIdByParticipant(participant);
 }

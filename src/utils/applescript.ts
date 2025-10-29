@@ -1,9 +1,19 @@
 import { execFile } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { resolve as resolvePath, isAbsolute, join } from "node:path";
-import { stat, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { stat, mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 const OSASCRIPT_MODE = (process.env.MESSAGES_MCP_OSASCRIPT_MODE ?? "file").toLowerCase();
+const APPLESCRIPT_ASSET_ROOT = new URL("../../scripts/applescript/", import.meta.url);
+
+function resolveAppleScriptAsset(filename: string): string {
+  try {
+    return fileURLToPath(new URL(filename, APPLESCRIPT_ASSET_ROOT));
+  } catch (error) {
+    throw new Error(`Unable to resolve AppleScript asset '${filename}': ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 function execOsaScript(commandArgs: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -19,6 +29,15 @@ function execOsaScript(commandArgs: string[]): Promise<string> {
       resolve(stdout.toString().trim());
     });
   });
+}
+
+export async function runAppleScriptAsset(scriptName: string, args: string[]): Promise<string> {
+  const scriptPath = resolveAppleScriptAsset(scriptName);
+  if (OSASCRIPT_MODE === "inline") {
+    const source = await readFile(scriptPath, "utf8");
+    return runAppleScriptInline(source, args);
+  }
+  return execOsaScript([scriptPath, ...args]);
 }
 
 export async function runAppleScriptInline(script: string, args: string[] = []): Promise<string> {
@@ -42,6 +61,12 @@ export type SendTarget = {
   recipient?: string;
   chatGuid?: string;
   chatName?: string;
+};
+
+export type SendRoute = "imessage" | "sms" | "rcs" | "unknown";
+
+export type SendMessageResult = {
+  route: SendRoute | null;
 };
 
 const SEND_PAYLOAD_SCRIPT = `use framework "Foundation"
@@ -409,6 +434,16 @@ function resolveSendTarget(target: string | SendTarget): { mode: TargetMode; val
   throw new Error("A recipient, chatGuid, or chatName is required.");
 }
 
+function normalizeSendRoute(value: string | null | undefined): SendRoute | null {
+  if (!value) return null;
+  const lowered = value.trim().toLowerCase();
+  if (!lowered) return null;
+  if (lowered === "imessage") return "imessage";
+  if (lowered === "sms") return "sms";
+  if (lowered === "rcs") return "rcs";
+  return "unknown";
+}
+
 async function runSendPayload(
   payloadKind: "text" | "text_path" | "file",
   target: string | SendTarget,
@@ -423,18 +458,26 @@ async function runSendPayload(
   await runAppleScriptInline(SEND_PAYLOAD_SCRIPT, args);
 }
 
-export async function sendMessageAppleScript(target: string | SendTarget, text: string): Promise<void> {
+export async function sendMessageAppleScript(target: string | SendTarget, text: string): Promise<SendMessageResult> {
   if (!text || text.trim().length === 0) {
     throw new Error("Message text must not be empty.");
   }
+  const resolvedTarget = resolveSendTarget(target);
   const tempDir = await mkdtemp(join(tmpdir(), "messages-mcp-"));
   const payloadPath = join(tempDir, "body.txt");
+  let route: SendRoute | null = null;
   try {
     await writeFile(payloadPath, text, { encoding: "utf8" });
-    await runSendPayload("text_path", target, payloadPath);
+    if (resolvedTarget.mode === "recipient") {
+      const rawRoute = await runAppleScriptAsset("send_message.applescript", [resolvedTarget.value, payloadPath]);
+      route = normalizeSendRoute(rawRoute);
+    } else {
+      await runSendPayload("text_path", target, payloadPath);
+    }
   } finally {
     await rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
+  return { route };
 }
 
 function expandUserPath(rawPath: string): string {

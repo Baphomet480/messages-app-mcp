@@ -1,3 +1,5 @@
+import type { SendRoute } from "./applescript.js";
+
 export type SendTargetDescriptor = {
   recipient: string | null;
   chat_guid: string | null;
@@ -19,6 +21,7 @@ export type SendSuccessPayload<TMessage extends MessageLike> = {
   latest_message?: TMessage | null;
   recent_messages?: TMessage[];
   lookup_error?: string;
+  route?: SendRoute | null;
 };
 
 export type SendFailurePayload = {
@@ -56,8 +59,9 @@ export function buildSendSuccessPayload<TMessage extends MessageLike>(options: {
   messages?: TMessage[];
   lookupError?: string | null;
   summary?: string;
+  route?: SendRoute | null;
 }): SendSuccessPayload<TMessage> {
-  const { target, chatId = null, messages = [], lookupError, summary } = options;
+  const { target, chatId = null, messages = [], lookupError, summary, route } = options;
   const { latest, recent } = selectRecentMessages(messages);
   const payload: SendSuccessPayload<TMessage> = {
     status: "sent",
@@ -68,6 +72,7 @@ export function buildSendSuccessPayload<TMessage extends MessageLike>(options: {
   if (latest) payload.latest_message = latest;
   if (recent.length) payload.recent_messages = recent;
   if (lookupError) payload.lookup_error = lookupError;
+  if (route !== undefined) payload.route = route ?? null;
   return payload;
 }
 

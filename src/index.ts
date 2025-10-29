@@ -51,6 +51,12 @@ import type { EnrichedMessageRow, AttachmentInfo } from "./utils/sqlite.js";
 import { startLogViewer, type LogViewerHandle } from "./utils/log-viewer.js";
 import { loadMessagesConfig, type MessagesConfig } from "./config.js";
 import { refineSearchIntent } from "./utils/ai-search.js";
+import {
+  contactsFeatureEnabled,
+  resolveContactNames,
+  searchContacts as contactsSearch,
+  type ContactSearchResult,
+} from "./utils/contacts.js";
 
 const { auth, requiresAuth } = expressOpenIdConnect;
 const logger = getLogger();
@@ -243,7 +249,7 @@ async function collectRecentMessages(
       const rowsWithChat = recentRows.map((row) => ({ ...row, chat_id: chatId })) as Array<
         EnrichedMessageRow & { chat_id?: number }
       >;
-      messages = normalizeMessages(rowsWithChat);
+      messages = await normalizeMessagesWithContacts(rowsWithChat);
     }
   } catch (err) {
     lookupError = err instanceof Error ? err.message : String(err);
@@ -552,7 +558,10 @@ function loadOAuthRuntimeConfig(): OAuthRuntimeConfig | null {
   };
 }
 
-const CONNECTOR_DEFAULT_DAYS_BACK = parseEnvInt("MESSAGES_MCP_CONNECTOR_DAYS_BACK", 30, 1, 365);
+const DEFAULT_SEARCH_DAYS_BACK = parseEnvInt("MESSAGES_MCP_DEFAULT_DAYS_BACK", 30, 1, 365);
+const SEARCH_LIMIT_MAX = parseEnvInt("MESSAGES_MCP_SEARCH_LIMIT_MAX", 200, 50, 500);
+const SEARCH_LIMIT_DEFAULT = Math.min(50, SEARCH_LIMIT_MAX);
+const CONNECTOR_DEFAULT_DAYS_BACK = parseEnvInt("MESSAGES_MCP_CONNECTOR_DAYS_BACK", DEFAULT_SEARCH_DAYS_BACK, 1, 365);
 const CONNECTOR_DEFAULT_LIMIT = parseEnvInt("MESSAGES_MCP_CONNECTOR_SEARCH_LIMIT", 20, 1, 50);
 const CONNECTOR_BASE_URL = (process.env.MESSAGES_MCP_CONNECTOR_BASE_URL || "").trim().replace(/\/+$/, "");
 const HISTORY_BY_DAYS_MAX = parseEnvInt("MESSAGES_MCP_HISTORY_MAX_DAYS", 730, 1, 3650);
@@ -611,6 +620,7 @@ type NormalizedMessage = MessageLike & {
   text: string | null;
   text_source: "text" | "attributedBody" | "none";
   sender: string | null;
+  sender_name?: string | null;
   unix_ms: number | null;
   iso_utc: string | null;
   iso_local: string | null;
@@ -705,6 +715,35 @@ function normalizeMessages(rows: Array<EnrichedMessageRow & { chat_id?: number }
   return rows.map((row) => normalizeMessage(row));
 }
 
+async function enrichMessagesWithContacts(messages: NormalizedMessage[]): Promise<NormalizedMessage[]> {
+  if (!contactsFeatureEnabled()) return messages;
+  const handles = new Set<string>();
+  for (const msg of messages) {
+    if (!msg.from_me) {
+      const trimmed = msg.sender?.trim();
+      if (trimmed) handles.add(trimmed);
+    }
+  }
+  if (handles.size === 0) return messages;
+  const nameMap = await resolveContactNames(handles);
+  if (!nameMap.size) return messages;
+  return messages.map((msg) => {
+    if (msg.from_me) return msg;
+    const trimmed = msg.sender?.trim();
+    if (!trimmed) return msg;
+    const name = nameMap.get(trimmed);
+    if (!name) return msg;
+    return { ...msg, sender_name: name };
+  });
+}
+
+async function normalizeMessagesWithContacts(
+  rows: Array<EnrichedMessageRow & { chat_id?: number }>,
+): Promise<NormalizedMessage[]> {
+  const normalized = normalizeMessages(rows);
+  return enrichMessagesWithContacts(normalized);
+}
+
 const normalizedMessageSchema = z.object({
   message_rowid: z.number(),
   chat_id: z.number().nullable().optional(),
@@ -713,6 +752,7 @@ const normalizedMessageSchema = z.object({
   text: z.string().nullable(),
   text_source: z.enum(["text", "attributedBody", "none"]),
   sender: z.string().nullable(),
+  sender_name: z.string().nullable().optional(),
   unix_ms: z.number().nullable(),
   iso_utc: z.string().nullable(),
   iso_local: z.string().nullable(),
@@ -748,6 +788,7 @@ type InboxConversationSummary = {
   guid: string | null;
   display_name: string | null;
   participants: string[];
+  participant_names?: (string | null)[];
   unread_count: number;
   last_message_unix_ms: number | null;
   last_message_iso: string | null;
@@ -766,14 +807,28 @@ async function buildInboxSnapshot(limit: number): Promise<InboxSnapshot> {
   const conversations = await Promise.all(
     chats.map(async (chat) => {
       const rows = await getMessagesByChatId(chat.chat_id, 1);
-      const normalized = normalizeMessages(rows.map((row) => ({ ...row, chat_id: chat.chat_id })));
+      const normalized = await normalizeMessagesWithContacts(
+        rows.map((row) => ({ ...row, chat_id: chat.chat_id })),
+      );
       const latest = normalized[0] ?? null;
       const lastUnix = appleEpochToUnixMs(chat.last_message_date);
+      const participants = extractParticipantsList(chat.participants);
+      let participantNames: (string | null)[] | undefined;
+      if (contactsFeatureEnabled() && participants.length > 0) {
+        const nameMap = await resolveContactNames(participants);
+        if (nameMap.size > 0) {
+          participantNames = participants.map((handle) => {
+            const trimmed = handle.trim();
+            return trimmed ? nameMap.get(trimmed) ?? null : null;
+          });
+        }
+      }
       return {
         chat_id: chat.chat_id,
         guid: chat.guid ?? null,
         display_name: chat.display_name ?? null,
-        participants: extractParticipantsList(chat.participants),
+        participants,
+        participant_names: participantNames,
         unread_count: Number(chat.unread_count ?? 0),
         last_message_unix_ms: lastUnix,
         last_message_iso: toIsoUtc(lastUnix),
@@ -800,6 +855,7 @@ type ConversationResourcePayload = {
     guid: string | null;
     display_name: string | null;
     participants: string[];
+    participant_names?: (string | null)[];
     unread_count: number;
     last_message_unix_ms: number | null;
     last_message_iso: string | null;
@@ -864,7 +920,10 @@ async function buildConversationResourcePayload(selector: string, rawValue: stri
   });
 
   const rows = await getMessagesByChatId(chatRow.chat_id, CONVERSATION_RESOURCE_MESSAGE_LIMIT);
-  const normalized = normalizeMessages(rows.map((row) => ({ ...row, chat_id: chatRow.chat_id }))).sort((a, b) => {
+  const normalized = await normalizeMessagesWithContacts(
+    rows.map((row) => ({ ...row, chat_id: chatRow.chat_id })),
+  );
+  normalized.sort((a, b) => {
     const aTime = typeof a.unix_ms === "number" ? a.unix_ms : 0;
     const bTime = typeof b.unix_ms === "number" ? b.unix_ms : 0;
     return aTime - bTime;
@@ -872,6 +931,16 @@ async function buildConversationResourcePayload(selector: string, rawValue: stri
 
   const lastUnix = appleEpochToUnixMs(chatRow.last_message_date);
   const participants = extractParticipantsList(chatRow.participants);
+  let participantNames: (string | null)[] | undefined;
+  if (contactsFeatureEnabled() && participants.length > 0) {
+    const nameMap = await resolveContactNames(participants);
+    if (nameMap.size > 0) {
+      participantNames = participants.map((handle) => {
+        const trimmed = handle.trim();
+        return trimmed ? nameMap.get(trimmed) ?? null : null;
+      });
+    }
+  }
   const chatTitle =
     chatRow.display_name?.trim?.() ||
     (participants.length ? participants.join(", ") : chatRow.guid) ||
@@ -886,6 +955,7 @@ async function buildConversationResourcePayload(selector: string, rawValue: stri
       guid: chatRow.guid ?? null,
       display_name: chatRow.display_name ?? null,
       participants,
+      participant_names: participantNames,
       unread_count: Number(chatRow.unread_count ?? 0),
       last_message_unix_ms: lastUnix,
       last_message_iso: toIsoUtc(lastUnix),
@@ -929,6 +999,7 @@ const sendSuccessSchema = z.object({
   latest_message: normalizedMessageSchema.nullable().optional(),
   recent_messages: z.array(normalizedMessageSchema).optional(),
   lookup_error: z.string().optional(),
+  route: z.enum(["imessage", "sms", "rcs", "unknown"]).nullable().optional(),
 });
 
 const sendFailureSchema = z.object({
@@ -936,6 +1007,7 @@ const sendFailureSchema = z.object({
   summary: z.string(),
   target: sendTargetDescriptorSchema,
   error: z.string(),
+  route: z.enum(["imessage", "sms", "rcs", "unknown"]).nullable().optional(),
 });
 
 
@@ -963,6 +1035,7 @@ const sendStandardOutputSchema = z.object({
   submitted_segment_unit_size: z.number().int().positive().optional(),
   submitted_segment_unit_count: z.number().int().nonnegative().optional(),
   payload_warning: z.string().optional(),
+  route: z.enum(["imessage", "sms", "rcs", "unknown"]).nullable().optional(),
 });
 
 type SendOutputExtras = {
@@ -1007,6 +1080,7 @@ function toStandardSendOutput(payload: SendResultPayload<NormalizedMessage>, ext
       latest_message: p.latest_message ?? null,
       recent_messages: p.recent_messages ?? [],
       lookup_error: p.lookup_error,
+      route: p.route ?? null,
     };
     return applySendExtras(base, extra);
   }
@@ -1020,6 +1094,7 @@ function toStandardSendOutput(payload: SendResultPayload<NormalizedMessage>, ext
     recent_messages: [],
     error: p.error,
     lookup_error: p.lookup_error,
+    route: null,
   };
   return applySendExtras(base, extra);
 }
@@ -1196,7 +1271,7 @@ function createConfiguredServer(): McpServer {
       const targetDescriptor = buildTargetDescriptor(base);
       try {
         const target = buildSendTarget(base);
-        await sendMessageAppleScript(target, text);
+        const { route } = await sendMessageAppleScript(target, text);
 
         const { chatId, messages, lookupError } = await collectRecentMessages(base);
         const payload = buildSendSuccessPayload<NormalizedMessage>({
@@ -1204,6 +1279,7 @@ function createConfiguredServer(): McpServer {
           chatId,
           messages,
           lookupError,
+          route,
         });
         const segmentInfo = estimateSegmentInfo(text);
         const textLength = Array.from(text).length;
@@ -1228,6 +1304,7 @@ function createConfiguredServer(): McpServer {
           submitted_segment_count: segmentInfo.segments,
           submitted_segment_encoding: segmentInfo.encoding,
           payload_warning: payloadWarning ?? null,
+          delivery_route: route ?? null,
         });
         return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std };
       } catch (e) {
@@ -1520,6 +1597,11 @@ function createConfiguredServer(): McpServer {
             purpose: "Enumerate active threads to select the correct conversation prior to sending.",
             inputs: ["limit", "participant", "updated_after_unix_ms", "unread_only"],
           },
+          {
+            tool: "search_contacts",
+            purpose: "Lookup macOS Contacts entries by name, phone, or email when contact enrichment is enabled.",
+            inputs: ["query", "limit"],
+          },
         ],
         requirements: [
           "macOS with Messages.app signed into the desired services",
@@ -1569,6 +1651,8 @@ function createConfiguredServer(): McpServer {
             guid: z.string(),
             display_name: z.string().nullable(),
             participants: z.array(z.string()),
+            participant_names: z.array(z.string().nullable()).optional(),
+            effective_display_name: z.string().nullable().optional(),
             last_message_unix_ms: z.number().nullable(),
             last_message_iso_utc: z.string().nullable(),
             last_message_iso_local: z.string().nullable(),
@@ -1588,13 +1672,37 @@ function createConfiguredServer(): McpServer {
           updatedAfterUnixMs: updated_after_unix_ms ?? undefined,
           unreadOnly: unread_only ?? false,
         });
-        const mapped = rows.map((r) => {
+        const participantLists = rows.map((r) => extractParticipantsList(r.participants));
+        let contactMap = new Map<string, string>();
+        if (contactsFeatureEnabled()) {
+          const aggregate = new Set<string>();
+          for (const list of participantLists) {
+            for (const handle of list) {
+              const trimmed = handle.trim();
+              if (trimmed) aggregate.add(trimmed);
+            }
+          }
+          if (aggregate.size > 0) {
+            contactMap = await resolveContactNames(aggregate);
+          }
+        }
+        const mapped = rows.map((r, index) => {
           const unix = appleEpochToUnixMs(r.last_message_date);
+          const participants = participantLists[index];
+          const participantNames = participants.map((handle) => {
+            const trimmed = handle.trim();
+            return trimmed ? contactMap.get(trimmed) ?? null : null;
+          });
+          const hasContactNames = participantNames.some((name) => name && name.trim().length > 0);
+          const effectiveDisplay =
+            r.display_name ?? (hasContactNames ? participantNames.find((name) => !!name) : null) ?? participants[0] ?? null;
           return {
             chat_id: r.chat_id,
             guid: r.guid,
             display_name: r.display_name ?? null,
-            participants: r.participants ? r.participants.split(",") : [],
+            participants,
+            participant_names: hasContactNames ? participantNames : undefined,
+            effective_display_name: effectiveDisplay,
             last_message_unix_ms: unix,
             last_message_iso_utc: toIsoUtc(unix),
             last_message_iso_local: toIsoLocal(unix),
@@ -1694,7 +1802,7 @@ function createConfiguredServer(): McpServer {
           chat_id != null
             ? await getMessagesByChatId(chat_id, limit)
             : await getMessagesByParticipant(participant!, limit);
-        const mapped = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort(
+        const mapped = (await normalizeMessagesWithContacts(rows as Array<EnrichedMessageRow & { chat_id?: number }>)).sort(
           (a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0),
         );
         const summaryParts: string[] = [];
@@ -1720,9 +1828,9 @@ function createConfiguredServer(): McpServer {
             context_after,
             !!context_include_attachments_meta,
           );
-          const ctxMessages = normalizeMessages(ctxRows as Array<EnrichedMessageRow & { chat_id?: number }>).sort(
-            (a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0),
-          );
+          const ctxMessages = (await normalizeMessagesWithContacts(
+            ctxRows as Array<EnrichedMessageRow & { chat_id?: number }>,
+          )).sort((a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0));
           structuredContent.context = {
             anchor_rowid: context_anchor_rowid,
             before: context_before,
@@ -1778,7 +1886,7 @@ function createConfiguredServer(): McpServer {
         const rows = await getMessagesByParticipant(participant, limit, {
           includeAttachmentsMeta: !!include_attachments_meta,
         });
-        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>);
+        const normalized = await normalizeMessagesWithContacts(rows as Array<EnrichedMessageRow & { chat_id?: number }>);
         mcpLog.info("recent_messages_by_participant", {
           participant,
           masked_participant: maskRecipient(participant),
@@ -1798,6 +1906,62 @@ function createConfiguredServer(): McpServer {
           error: message,
         });
         return { content: textContent(msg), isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    "search_contacts",
+    {
+      title: "Search Contacts",
+      description: "Resolve macOS Contacts entries by name, phone number, or email (opt-in).",
+      inputSchema: {
+        query: z
+          .string()
+          .optional()
+          .describe("Text to match against contact names, phone numbers, or emails."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe("Maximum number of contacts to return (defaults to 20)."),
+      },
+      outputSchema: {
+        contacts: z.array(
+          z.object({
+            name: z.string(),
+            phones: z.array(z.string()),
+            emails: z.array(z.string()),
+          }),
+        ),
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ query, limit }) => {
+      if (!contactsFeatureEnabled()) {
+        const message = "Contact lookups are disabled. Set MESSAGES_MCP_CONTACTS=1 to enable contact search.";
+        return { content: textContent(message), isError: true };
+      }
+      try {
+        const results: ContactSearchResult[] = await contactsSearch(query ?? "", limit ?? 20);
+        const structuredContent = { contacts: results } as const;
+        return {
+          content: textContent(JSON.stringify(structuredContent, null, 2)),
+          structuredContent,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const payload = { contacts: [] } as const;
+        return {
+          content: textContent(`Failed to search contacts. Error: ${message}`),
+          structuredContent: payload,
+          isError: true,
+        };
       }
     }
   );
@@ -2181,7 +2345,7 @@ function createConfiguredServer(): McpServer {
           includeAttachmentsMeta: !!input.include_attachments_meta,
         });
         const lowerQ = input.query.toLowerCase();
-        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id: number }>);
+        const normalized = await normalizeMessagesWithContacts(rows as Array<EnrichedMessageRow & { chat_id: number }>);
         const chatLookup = new Map<number, number>();
         for (const row of rows as Array<EnrichedMessageRow & { chat_id: number }>) {
           chatLookup.set(row.message_rowid, row.chat_id);
@@ -2291,7 +2455,7 @@ function createConfiguredServer(): McpServer {
           isError: true,
         };
       }
-      const effectiveDays = clampNumber(days_back ?? 30, 1, HISTORY_BY_DAYS_MAX);
+      const effectiveDays = clampNumber(days_back ?? DEFAULT_SEARCH_DAYS_BACK, 1, HISTORY_BY_DAYS_MAX);
       const effectiveLimit = clampNumber(limit ?? 100, 1, 500);
       const fromUnix = Date.now() - effectiveDays * 86_400_000;
       try {
@@ -2303,7 +2467,7 @@ function createConfiguredServer(): McpServer {
           limit: effectiveLimit,
           includeAttachmentsMeta: !!include_attachments_meta,
         });
-        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id: number }>).sort(
+        const normalized = (await normalizeMessagesWithContacts(rows as Array<EnrichedMessageRow & { chat_id: number }>)).sort(
           (a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0),
         );
         const summaryParts = [`${normalized.length} messages`, `days_back=${effectiveDays}`, `limit=${effectiveLimit}`];
@@ -2473,7 +2637,7 @@ function createConfiguredServer(): McpServer {
           limit: resultLimit,
           includeAttachmentsMeta: true,
         });
-        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id: number }>);
+        const normalized = await normalizeMessagesWithContacts(rows as Array<EnrichedMessageRow & { chat_id: number }>);
         const chatLookup = new Map<number, number>();
         for (const row of rows as Array<EnrichedMessageRow & { chat_id: number }>) {
           chatLookup.set(row.message_rowid, row.chat_id);
@@ -2498,7 +2662,9 @@ function createConfiguredServer(): McpServer {
           } else {
             snippet = "(no text)";
           }
-          const counterpart = msg.from_me ? "Me" : msg.sender ? displayRecipient(msg.sender) : "Unknown sender";
+          const counterpart = msg.from_me
+            ? "Me"
+            : msg.sender_name ?? (msg.sender ? displayRecipient(msg.sender) : "Unknown sender");
           const timestamp = msg.iso_local ?? msg.iso_utc ?? null;
           const titleParts: string[] = [];
           if (counterpart) titleParts.push(counterpart);
@@ -2518,7 +2684,7 @@ function createConfiguredServer(): McpServer {
             metadata: {
               chat_id: metadataChatId,
               from_me: msg.from_me,
-              sender: msg.sender ? displayRecipient(msg.sender) : null,
+              sender: msg.sender_name ?? (msg.sender ? displayRecipient(msg.sender) : null),
               iso_utc: msg.iso_utc,
               iso_local: msg.iso_local,
             },
@@ -2651,7 +2817,7 @@ function createConfiguredServer(): McpServer {
           isError: true,
         };
       }
-      const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>);
+      const normalized = await normalizeMessagesWithContacts(rows as Array<EnrichedMessageRow & { chat_id?: number }>);
       const anchor = normalized.find((msg) => msg.message_rowid === rowId);
       if (!anchor) {
         const payload = buildErrorDocument("Message not found");
@@ -2686,7 +2852,9 @@ function createConfiguredServer(): McpServer {
           .filter((link): link is ToolResourceLink => Boolean(link)) ?? [];
       const formatLine = (msg: NormalizedMessage): string => {
         const when = msg.iso_local ?? msg.iso_utc ?? "";
-        const speaker = msg.from_me ? "Me" : (msg.sender ? displayRecipient(msg.sender) : "Unknown");
+        const speaker = msg.from_me
+          ? "Me"
+          : msg.sender_name ?? (msg.sender ? displayRecipient(msg.sender) : "Unknown");
         let body = msg.text?.trim().length ? msg.text.trim() : "";
         if (!body) {
           if (msg.has_attachments && msg.attachment_hints?.length) {
@@ -2708,7 +2876,7 @@ function createConfiguredServer(): McpServer {
         metadata: {
           chat_id: anchor.chat_id ?? null,
           from_me: anchor.from_me,
-          sender: anchor.sender ? displayRecipient(anchor.sender) : null,
+          sender: anchor.sender_name ?? (anchor.sender ? displayRecipient(anchor.sender) : null),
           iso_utc: anchor.iso_utc,
           iso_local: anchor.iso_local,
           has_attachments: anchor.has_attachments,
@@ -2764,7 +2932,7 @@ function createConfiguredServer(): McpServer {
     },
     async ({ message_rowid, before, after, include_attachments_meta }) => {
       const rows = await contextAroundMessage(message_rowid, before, after, !!include_attachments_meta);
-      const mapped = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort(
+      const mapped = (await normalizeMessagesWithContacts(rows as Array<EnrichedMessageRow & { chat_id?: number }>)).sort(
         (a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0),
       );
       return {
@@ -2844,7 +3012,7 @@ function createConfiguredServer(): McpServer {
           .int()
           .min(1)
           .max(365)
-          .default(30)
+          .default(DEFAULT_SEARCH_DAYS_BACK)
           .describe("When no chat or participant is given, limit search to this many days."),
         from_me: z
           .boolean()
@@ -2858,8 +3026,8 @@ function createConfiguredServer(): McpServer {
           .number()
           .int()
           .min(1)
-          .max(200)
-          .default(50)
+          .max(SEARCH_LIMIT_MAX)
+          .default(SEARCH_LIMIT_DEFAULT)
           .describe("Maximum number of results to return (defaults to 50)."),
         offset: z
           .number()
@@ -2889,7 +3057,8 @@ function createConfiguredServer(): McpServer {
         return { content: textContent("Provide chat_id, participant, or days_back."), isError: true };
       }
       const now = Date.now();
-      const from = input.chat_id != null || input.participant ? undefined : now - (input.days_back ?? 30) * 86400000;
+      const from =
+        input.chat_id != null || input.participant ? undefined : now - (input.days_back ?? DEFAULT_SEARCH_DAYS_BACK) * 86400000;
       try {
         const rows = await searchMessages({
           query: input.query,
@@ -2904,7 +3073,7 @@ function createConfiguredServer(): McpServer {
           includeAttachmentsMeta: !!input.include_attachments_meta,
         });
         const lowerQ = input.query.toLowerCase();
-        const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id: number }>);
+        const normalized = await normalizeMessagesWithContacts(rows as Array<EnrichedMessageRow & { chat_id: number }>);
         const chatLookup = new Map<number, number>();
         for (const row of rows as Array<EnrichedMessageRow & { chat_id: number }>) {
           chatLookup.set(row.message_rowid, row.chat_id);
@@ -2993,12 +3162,12 @@ function createConfiguredServer(): McpServer {
     },
     async ({ message_rowid, before, after, max_chars }) => {
       const rows = await contextAroundMessage(message_rowid, before, after, false);
-      const normalized = normalizeMessages(rows as Array<EnrichedMessageRow & { chat_id?: number }>).sort(
+      const normalized = (await normalizeMessagesWithContacts(rows as Array<EnrichedMessageRow & { chat_id?: number }>)).sort(
         (a, b) => (a.unix_ms ?? 0) - (b.unix_ms ?? 0),
       );
       const ordered = normalized.map((msg) => ({
         t: msg.unix_ms ?? 0,
-        from: msg.from_me ? "me" : msg.sender || "other",
+        from: msg.from_me ? "me" : msg.sender_name ?? msg.sender ?? "other",
         text: msg.text || "",
       }));
       const start = ordered[0]?.t;
