@@ -53,10 +53,18 @@ import { loadMessagesConfig, type MessagesConfig } from "./config.js";
 import { refineSearchIntent } from "./utils/ai-search.js";
 import {
   contactsFeatureEnabled,
+  resolveContactName,
   resolveContactNames,
   searchContacts as contactsSearch,
   type ContactSearchResult,
 } from "./utils/contacts.js";
+import {
+  encodeContactResourceId,
+  decodeContactResourceId,
+  buildContactDescription,
+  buildContactPayload,
+  toContactResourceData,
+} from "./utils/contact-resource.js";
 
 const { auth, requiresAuth } = expressOpenIdConnect;
 const logger = getLogger();
@@ -194,6 +202,29 @@ function buildTargetDescriptor(input: SendTargetInput): SendTargetDescriptor {
   };
 }
 
+async function buildTargetDescriptorAsync(input: SendTargetInput): Promise<SendTargetDescriptor> {
+  const descriptor = buildTargetDescriptor(input);
+  if (!contactsFeatureEnabled()) return descriptor;
+  const recipient = descriptor.recipient?.trim();
+  if (!recipient) return descriptor;
+  try {
+    const name = await resolveContactName(recipient);
+    const trimmedName = name?.trim();
+    if (!trimmedName) return descriptor;
+    const recipientDisplay = displayRecipient(recipient);
+    const display = recipientDisplay.includes(trimmedName)
+      ? recipientDisplay
+      : `${trimmedName} (${recipientDisplay})`;
+    return {
+      ...descriptor,
+      display,
+      contact_name: trimmedName,
+    };
+  } catch {
+    return descriptor;
+  }
+}
+
 function hasTarget(input: SendTargetInput): boolean {
   return Boolean(
     (input.recipient && input.recipient.trim()) ||
@@ -233,6 +264,27 @@ async function resolveChatIdForTarget(input: SendTargetInput): Promise<number | 
     if (resolved != null) return resolved;
   }
   return null;
+}
+
+async function buildPreferredSendTarget(input: SendTargetInput): Promise<SendTarget> {
+  if (!hasTarget(input)) {
+    throw new Error("Provide recipient, chat_guid, or chat_name.");
+  }
+  if (input.chat_guid && input.chat_guid.trim().length > 0) {
+    return buildSendTarget(input);
+  }
+  const chatId = await resolveChatIdForTarget(input).catch(() => null);
+  if (chatId != null) {
+    try {
+      const chat = await getChatById(chatId);
+      if (chat?.guid && chat.guid.trim().length > 0) {
+        return buildSendTarget({ chat_guid: chat.guid });
+      }
+    } catch {
+      // ignore – fall back to original input
+    }
+  }
+  return buildSendTarget(input);
 }
 
 async function collectRecentMessages(
@@ -570,6 +622,8 @@ const INBOX_RESOURCE_LIMIT = parseEnvInt("MESSAGES_MCP_INBOX_RESOURCE_LIMIT", 15
 const CONVERSATION_RESOURCE_TEMPLATE_URI = "messages://conversation/{selector}/{value}";
 const CONVERSATION_RESOURCE_MESSAGE_LIMIT = parseEnvInt("MESSAGES_MCP_CONVERSATION_RESOURCE_LIMIT", 60, 10, 200);
 const CONVERSATION_RESOURCE_LIST_LIMIT = parseEnvInt("MESSAGES_MCP_CONVERSATION_LIST_LIMIT", 20, 5, 100);
+const CONTACT_RESOURCE_TEMPLATE_URI = "messages://contact/{contactId}";
+const CONTACT_RESOURCE_LIST_LIMIT = parseEnvInt("MESSAGES_MCP_CONTACT_RESOURCE_LIMIT", 25, 5, 100);
 
 function toIsoUtc(unixMs: number | null): string | null {
   if (unixMs == null) return null;
@@ -685,6 +739,10 @@ function normalizeMessage(row: EnrichedMessageRow & { chat_id?: number }): Norma
     item_type: row.item_type ?? null,
     message_type_raw: row.message_type_raw ?? null,
   };
+  const errorCode = (row as any).error;
+  if (typeof errorCode === "number") {
+    metadata.error_code = errorCode;
+  }
   if (row.attributed_body_meta) {
     metadata.attributed_body = row.attributed_body_meta;
   }
@@ -913,7 +971,7 @@ async function buildConversationResourcePayload(selector: string, rawValue: stri
     throw new Error(`Chat ${chatId} not found.`);
   }
 
-  const descriptor = buildTargetDescriptor({
+  const descriptor = await buildTargetDescriptorAsync({
     recipient: candidateRecipient ?? undefined,
     chat_guid: chatRow.guid ?? candidateGuid ?? undefined,
     chat_name: chatRow.display_name ?? candidateName ?? undefined,
@@ -1045,6 +1103,23 @@ type SendOutputExtras = {
   segmentInfo?: SegmentInfo | null;
   payloadWarning?: string;
 };
+
+function detectSendErrorFromMessages(messages: NormalizedMessage[]): number | null {
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  const sorted = [...messages].sort((a, b) => {
+    const aTime = typeof a.unix_ms === "number" && Number.isFinite(a.unix_ms) ? a.unix_ms : 0;
+    const bTime = typeof b.unix_ms === "number" && Number.isFinite(b.unix_ms) ? b.unix_ms : 0;
+    return bTime - aTime;
+  });
+  const latestOutgoing = sorted.find((msg) => msg?.from_me);
+  if (!latestOutgoing) return null;
+  const meta = latestOutgoing.metadata ?? {};
+  const code = Number((meta as any).error_code ?? 0);
+  if (Number.isFinite(code) && code > 0) {
+    return code;
+  }
+  return null;
+}
 
 function applySendExtras(result: Record<string, unknown>, extra?: SendOutputExtras) {
   if (!extra) return result;
@@ -1258,7 +1333,7 @@ function createConfiguredServer(): McpServer {
             isError: true,
           };
         }
-        const targetDescriptor = buildTargetDescriptor(base);
+        const targetDescriptor = await buildTargetDescriptorAsync(base);
         const failure = buildSendFailurePayload(targetDescriptor, "Read-only mode is enabled.");
         mcpLog.warn("send_text skipped in read-only mode", {
           target: targetDescriptor.display,
@@ -1268,19 +1343,12 @@ function createConfiguredServer(): McpServer {
         return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std, isError: true };
       }
 
-      const targetDescriptor = buildTargetDescriptor(base);
+      const targetDescriptor = await buildTargetDescriptorAsync(base);
       try {
         const target = buildSendTarget(base);
         const { route } = await sendMessageAppleScript(target, text);
 
         const { chatId, messages, lookupError } = await collectRecentMessages(base);
-        const payload = buildSendSuccessPayload<NormalizedMessage>({
-          target: targetDescriptor,
-          chatId,
-          messages,
-          lookupError,
-          route,
-        });
         const segmentInfo = estimateSegmentInfo(text);
         const textLength = Array.from(text).length;
         let payloadWarning: string | undefined;
@@ -1288,6 +1356,33 @@ function createConfiguredServer(): McpServer {
           const unitLabel = segmentInfo.encoding === "gsm-7" ? "GSM-7 units" : "code points";
           payloadWarning = `Text spans ${segmentInfo.segments} segments (${segmentInfo.unitCount} ${unitLabel}); consider splitting to stay within ${SEGMENT_WARNING_THRESHOLD} segments for reliable delivery.`;
         }
+
+        const errorCode = detectSendErrorFromMessages(messages);
+        if (errorCode != null) {
+          const reason = `Messages reported delivery error code ${errorCode}. Check the Messages app for details.`;
+          const failure = buildSendFailurePayload(targetDescriptor, reason);
+          mcpLog.error("send_text delivery_failed", {
+            target: targetDescriptor.display,
+            recipient: maskRecipient(recipient ?? ""),
+            error: reason,
+            error_code: errorCode,
+          });
+          const stdFailure = toStandardSendOutput(failure, {
+            submittedText: text,
+            submittedLength: textLength,
+            segmentInfo,
+            payloadWarning,
+          });
+          return { content: textContent(JSON.stringify(stdFailure, null, 2)), structuredContent: stdFailure, isError: true };
+        }
+
+        const payload = buildSendSuccessPayload<NormalizedMessage>({
+          target: targetDescriptor,
+          chatId,
+          messages,
+          lookupError,
+          route,
+        });
         const std = toStandardSendOutput(payload, {
           submittedText: text,
           submittedLength: textLength,
@@ -1360,7 +1455,7 @@ function createConfiguredServer(): McpServer {
             isError: true,
           };
         }
-        const targetDescriptor = buildTargetDescriptor(base);
+        const targetDescriptor = await buildTargetDescriptorAsync(base);
         const failure = buildSendFailurePayload(targetDescriptor, "Read-only mode is enabled.");
         mcpLog.warn("send_attachment skipped in read-only mode", {
           target: targetDescriptor.display,
@@ -1371,41 +1466,63 @@ function createConfiguredServer(): McpServer {
       }
 
       try {
-        const target = buildSendTarget(base);
+        const target = await buildPreferredSendTarget(base);
         await sendAttachmentAppleScript(target, trimmedPath, caption);
-        const targetDescriptor = buildTargetDescriptor(base);
+        const targetDescriptor = await buildTargetDescriptorAsync(base);
 
         const fileLabel = trimmedPath ? basename(trimmedPath) : null;
         const labelSegment = fileLabel ? `"${fileLabel}" ` : "";
         const summary = `Sent attachment ${labelSegment}to ${targetDescriptor.display}.`.trim();
 
         const { chatId, messages, lookupError } = await collectRecentMessages(base);
-        const basePayload = buildSendSuccessPayload<NormalizedMessage>({
-          target: targetDescriptor,
-          chatId,
-          messages,
-          lookupError,
-          summary,
-        });
-        const std = toStandardSendOutput(basePayload, {
+        const errorCode = detectSendErrorFromMessages(messages);
+        const segmentInfo = null;
+        const payload = errorCode == null
+          ? buildSendSuccessPayload<NormalizedMessage>({
+              target: targetDescriptor,
+              chatId,
+              messages,
+              lookupError,
+              summary,
+            })
+          : null;
+        const extra = {
           attachment: {
             file_path: trimmedPath ?? null,
             file_label: fileLabel,
             caption: caption?.trim?.() ?? null,
           },
-        });
+        } satisfies SendOutputExtras;
+
+        if (errorCode != null || !payload) {
+          const reason = `Messages reported delivery error code ${errorCode}. Check the Messages app for details.`;
+          const failure = buildSendFailurePayload(targetDescriptor, reason);
+          mcpLog.error("send_attachment delivery_failed", {
+            target: targetDescriptor.display,
+            recipient: maskRecipient(recipient ?? ""),
+            chat_id: chatId ?? null,
+            file_label: fileLabel,
+            caption_preview: truncateForLog(caption),
+            error: reason,
+            error_code: errorCode,
+          });
+          const stdFailure = toStandardSendOutput(failure, extra);
+          return { content: textContent(JSON.stringify(stdFailure, null, 2)), structuredContent: stdFailure, isError: true };
+        }
+
+        const std = toStandardSendOutput(payload, extra);
         mcpLog.info("send_attachment success", {
           target: targetDescriptor.display,
           recipient: maskRecipient(recipient ?? ""),
           chat_id: chatId ?? null,
           file_label: fileLabel,
           caption_preview: truncateForLog(caption),
-          latest_message_id: basePayload.latest_message?.message_rowid ?? null,
+          latest_message_id: payload.latest_message?.message_rowid ?? null,
           lookup_error: lookupError ?? null,
         });
         return { content: textContent(JSON.stringify(std, null, 2)), structuredContent: std };
       } catch (e) {
-        const targetDescriptor = buildTargetDescriptor(base);
+        const targetDescriptor = await buildTargetDescriptorAsync(base);
         const reason =
           e instanceof Error && e.message === MESSAGES_FDA_HINT
             ? e.message
@@ -3285,6 +3402,73 @@ function createConfiguredServer(): McpServer {
         value: payload.value,
         chat_id: payload.chat.chat_id,
         message_count: payload.messages.length,
+      });
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(payload, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
+  const contactsTemplate = new ResourceTemplate(CONTACT_RESOURCE_TEMPLATE_URI, {
+    list: async () => {
+      if (!contactsFeatureEnabled()) {
+        mcpLog.debug("contact_resources_disabled");
+        return { resources: [] };
+      }
+      try {
+        const results = await contactsSearch("", CONTACT_RESOURCE_LIST_LIMIT);
+        const seen = new Set<string>();
+        const resources = results.map((entry) => {
+          const data = toContactResourceData(entry);
+          const contactId = encodeContactResourceId(data);
+          if (seen.has(contactId)) {
+            return null;
+          }
+          seen.add(contactId);
+          const description = buildContactDescription(data);
+          return {
+            uri: `messages://contact/${contactId}`,
+            name: data.name,
+            title: `Contact: ${data.name}`,
+            description,
+            mimeType: "application/json",
+          };
+        }).filter((value): value is NonNullable<typeof value> => value !== null);
+        mcpLog.debug("contact_resources_listed", { count: resources.length });
+        return { resources };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        mcpLog.error("contact_resources_list_failed", { error: message });
+        return { resources: [] };
+      }
+    },
+  });
+
+  server.registerResource(
+    "contact",
+    contactsTemplate,
+    {
+      title: "Contact Details",
+      description: "macOS Contacts entry with phone numbers and email addresses.",
+      mimeType: "application/json",
+    },
+    async (uri) => {
+      const id = uri.pathname.replace(/^\//, "");
+      const data = decodeContactResourceId(id);
+      if (!data) {
+        throw new Error("Invalid contact identifier.");
+      }
+      const payload = buildContactPayload(data, id);
+      mcpLog.debug("contact_resource_loaded", {
+        name: payload.name,
+        phone_count: payload.phones.length,
+        email_count: payload.emails.length,
       });
       return {
         contents: [

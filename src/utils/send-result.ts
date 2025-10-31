@@ -5,6 +5,7 @@ export type SendTargetDescriptor = {
   chat_guid: string | null;
   chat_name: string | null;
   display: string;
+  contact_name?: string | null;
 };
 
 export type MessageLike = {
