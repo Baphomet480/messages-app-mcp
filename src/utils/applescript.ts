@@ -55,6 +55,13 @@ export async function runAppleScriptInline(script: string, args: string[] = []):
   return execOsaScript(["-l", "AppleScript", "-e", script, ...args]);
 }
 
+function isAppleScriptSyntaxError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message) return false;
+  const lowered = message.toLowerCase();
+  return lowered.includes("script error: expected end of line");
+}
+
 type TargetMode = "recipient" | "chat";
 
 export type SendTarget = {
@@ -149,6 +156,66 @@ on readTextFile(posixPath)
   end try
 end readTextFile
 
+on collectServicesByType(serviceType)
+  tell application "Messages"
+    set matches to {}
+    try
+      set serviceList to services
+    on error
+      set serviceList to {}
+    end try
+    repeat with svc in serviceList
+      set isMatch to false
+      try
+        set svcType to (service type of svc) as string
+        if svcType is serviceType then set isMatch to true
+      end try
+      if isMatch then
+        try
+          if (enabled of svc) is false then
+            -- skip disabled services
+          else
+            set end of matches to svc
+          end if
+        on error
+          set end of matches to svc
+        end try
+      end if
+    end repeat
+  end tell
+  return matches
+end collectServicesByType
+
+on collectAccountsByType(serviceType)
+  tell application "Messages"
+    set matches to {}
+    try
+      set accountList to accounts
+    on error
+      set accountList to {}
+    end try
+    repeat with ac in accountList
+      set isMatch to false
+      try
+        set acType to (service type of ac) as string
+        if acType is serviceType then set isMatch to true
+      end try
+      if isMatch then
+        try
+          if (enabled of ac) is false then
+            -- skip disabled accounts
+          else
+            set end of matches to ac
+          end if
+        on error
+          set end of matches to ac
+        end try
+      end if
+    end repeat
+  end tell
+  return matches
+end collectAccountsByType
+
 on locateChat(chatKey)
   if chatKey is missing value or chatKey is "" then return missing value
   tell application "Messages"
@@ -192,24 +259,15 @@ on locateRecipient(theRecipient)
     set imAccounts to {}
     set smsAccounts to {}
     set rcsAccounts to {}
-    try
-      set imService to first service whose service type is iMessage
-    end try
-    try
-      set smsService to first service whose service type is SMS
-    end try
-    try
-      set rcsService to first service whose service type is RCS
-    end try
-    try
-      set imAccounts to every account whose service type is iMessage
-    end try
-    try
-      set smsAccounts to every account whose service type is SMS
-    end try
-    try
-      set rcsAccounts to every account whose service type is RCS
-    end try
+    set imServices to my collectServicesByType("iMessage")
+    set smsServices to my collectServicesByType("SMS")
+    set rcsServices to my collectServicesByType("RCS")
+    if (count of imServices) > 0 then set imService to item 1 of imServices
+    if (count of smsServices) > 0 then set smsService to item 1 of smsServices
+    if (count of rcsServices) > 0 then set rcsService to item 1 of rcsServices
+    set imAccounts to my collectAccountsByType("iMessage")
+    set smsAccounts to my collectAccountsByType("SMS")
+    set rcsAccounts to my collectAccountsByType("RCS")
 
     if imService is missing value and smsService is missing value and rcsService is missing value then
       error "No Messages services available. Sign in to iMessage or enable Text Message Forwarding/RCS on your iPhone."
@@ -326,24 +384,15 @@ on locateRecipientBuddy(theRecipient)
     set imAccounts to {}
     set smsAccounts to {}
     set rcsAccounts to {}
-    try
-      set imService to first service whose service type is iMessage
-    end try
-    try
-      set smsService to first service whose service type is SMS
-    end try
-    try
-      set rcsService to first service whose service type is RCS
-    end try
-    try
-      set imAccounts to every account whose service type is iMessage
-    end try
-    try
-      set smsAccounts to every account whose service type is SMS
-    end try
-    try
-      set rcsAccounts to every account whose service type is RCS
-    end try
+    set imServices to my collectServicesByType("iMessage")
+    set smsServices to my collectServicesByType("SMS")
+    set rcsServices to my collectServicesByType("RCS")
+    if (count of imServices) > 0 then set imService to item 1 of imServices
+    if (count of smsServices) > 0 then set smsService to item 1 of smsServices
+    if (count of rcsServices) > 0 then set rcsService to item 1 of rcsServices
+    set imAccounts to my collectAccountsByType("iMessage")
+    set smsAccounts to my collectAccountsByType("SMS")
+    set rcsAccounts to my collectAccountsByType("RCS")
 
     if imService is missing value and smsService is missing value and rcsService is missing value then
       return missing value
@@ -469,8 +518,16 @@ export async function sendMessageAppleScript(target: string | SendTarget, text: 
   try {
     await writeFile(payloadPath, text, { encoding: "utf8" });
     if (resolvedTarget.mode === "recipient") {
-      const rawRoute = await runAppleScriptAsset("send_message.applescript", [resolvedTarget.value, payloadPath]);
-      route = normalizeSendRoute(rawRoute);
+      try {
+        const rawRoute = await runAppleScriptAsset("send_message.applescript", [resolvedTarget.value, payloadPath]);
+        route = normalizeSendRoute(rawRoute);
+      } catch (error) {
+        if (isAppleScriptSyntaxError(error)) {
+          await runSendPayload("text_path", target, payloadPath);
+        } else {
+          throw error;
+        }
+      }
     } else {
       await runSendPayload("text_path", target, payloadPath);
     }

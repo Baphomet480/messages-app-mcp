@@ -64,14 +64,40 @@ on sendViaService(handleValue, bodyText, serviceType, routeName)
   end tell
 end sendViaService
 
-on findService(serviceType)
+on collectServicesByType(serviceType)
   tell application "Messages"
+    set matches to {}
     try
-      return first service whose service type is serviceType
+      set serviceList to services
     on error
-      return missing value
+      set serviceList to {}
     end try
+    repeat with svc in serviceList
+      set isMatch to false
+      try
+        set svcType to (service type of svc) as string
+        if svcType is serviceType then set isMatch to true
+      end try
+      if isMatch then
+        try
+          if (enabled of svc) is false then
+            -- skip disabled services
+          else
+            set end of matches to svc
+          end if
+        on error
+          set end of matches to svc
+        end try
+      end if
+    end repeat
   end tell
+  return matches
+end collectServicesByType
+
+on findService(serviceType)
+  set matches to my collectServicesByType(serviceType)
+  if (count of matches) > 0 then return item 1 of matches
+  return missing value
 end findService
 
 on locateHandleWithService(handleValue, serviceRef)
