@@ -22,6 +22,7 @@ export type MessagesConfig = {
     enabled?: boolean;
     autoOpen?: boolean;
     pollIntervalMs?: number;
+    port?: number;
   };
 };
 
@@ -31,6 +32,7 @@ const defaultConfig: MessagesConfig = {
     enabled: true,
     autoOpen: true,
     pollIntervalMs: undefined,
+    port: undefined,
   },
 };
 

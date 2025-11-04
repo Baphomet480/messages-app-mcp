@@ -1,15 +1,15 @@
-import express, { type Request, type Response } from "express";
+import express, { type Express, type Request, type Response } from "express";
 import { createServer, type Server as HttpServer } from "node:http";
 import { AddressInfo } from "node:net";
 import { open as fsOpen, stat as fsStat } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 
 type LogViewerOptions = {
   autoOpen?: boolean;
   sessionLabel?: string;
   pollIntervalMs?: number;
   onShutdownRequest?: () => void;
+  port?: number;
 };
 
 type LogChunkResponse = {
@@ -20,6 +20,31 @@ type LogChunkResponse = {
 
 const DEFAULT_MAX_CHUNK_BYTES = 256 * 1024;
 const DEFAULT_POLL_INTERVAL = 1500;
+
+function normalizePortOption(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  if (value === 0) return 0;
+  const integer = Math.floor(value);
+  if (integer < 1) return undefined;
+  if (integer > 65535) return 65535;
+  return integer;
+}
+
+async function listenOnPort(app: Express, port: number): Promise<HttpServer> {
+  const httpServer = createServer(app);
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: unknown) => {
+      httpServer.off("error", onError);
+      reject(error);
+    };
+    httpServer.once("error", onError);
+    httpServer.listen(port, "127.0.0.1", () => {
+      httpServer.off("error", onError);
+      resolve();
+    });
+  });
+  return httpServer;
+}
 
 const htmlTemplate = (sessionLabel: string | undefined, pollInterval: number, shutdownEnabled: boolean) => `<!DOCTYPE html>
 <html lang="en">
@@ -117,11 +142,11 @@ const htmlTemplate = (sessionLabel: string | undefined, pollInterval: number, sh
 
       let offset = Number(params.get('offset')) || 0;
       const pollInterval = ${pollInterval};
-      const levelRegex = /\[(DEBUG|INFO|WARN|ERROR)\]/;
+      const levelRegex = new RegExp("\\\\[(DEBUG|INFO|WARN|ERROR)\\\\]");
 
       function appendLines(chunk) {
         if (!chunk) return;
-        const lines = chunk.split(/\n/);
+        const lines = chunk.split(/\\n/);
         const frag = document.createDocumentFragment();
         for (const line of lines) {
           if (!line) continue;
@@ -305,16 +330,26 @@ export async function startLogViewer(logFilePath: string, options: LogViewerOpti
     });
   }
 
-  const server = await new Promise<HttpServer>((resolve, reject) => {
-    const httpServer = createServer(app);
-    httpServer.once("error", reject);
-    httpServer.listen(0, "127.0.0.1", () => {
-      httpServer.off("error", reject);
-      resolve(httpServer);
-    });
-  });
+  const preferredPort = normalizePortOption(options.port);
+  let server: HttpServer;
+  try {
+    server = await listenOnPort(app, preferredPort ?? 0);
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (preferredPort && preferredPort !== 0 && nodeError && nodeError.code === "EADDRINUSE") {
+      server = await listenOnPort(app, 0);
+    } else {
+      throw error;
+    }
+  }
 
-  const address = server.address() as AddressInfo;
+  const addressInfo = server.address();
+  if (!addressInfo || typeof addressInfo === "string") {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw new Error("log viewer failed to determine listening address");
+  }
+
+  const address = addressInfo as AddressInfo;
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const openedSessions = new Set<string>();
 
@@ -325,7 +360,7 @@ export async function startLogViewer(logFilePath: string, options: LogViewerOpti
       const label = sessionLabel && sessionLabel.trim().length > 0 ? sessionLabel.trim() : "session";
       if (openedSessions.has(label)) return;
       openedSessions.add(label);
-      const url = `${baseUrl}/?session=${encodeURIComponent(label)}&nonce=${randomUUID()}`;
+      const url = `${baseUrl}/?session=${encodeURIComponent(label)}`;
       openInDefaultBrowser(url);
     },
     async close() {

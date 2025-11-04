@@ -27,7 +27,7 @@ A Model Context Protocol (MCP) server that lets AI assistants interact with macO
 
 `messages-app-mcp` exposes Messages.app over MCP transports (stdio and optional Streamable HTTP). The server is designed for local use: it reads `~/Library/Messages/chat.db` in read-only mode and delegates outgoing sends to AppleScript.
 
-> **New in 2.1** – Streamable HTTP now advertises MCP resources. The server publishes a live inbox snapshot (`messages://inbox`) and parameterised conversation transcripts via `messages://conversation/{selector}/{value}`. Codex can subscribe to these without calling tools; see [Resources](#resources) for payload details.
+> **New in 2.1** – Streamable HTTP now advertises MCP resources. The server publishes a live inbox snapshot (`messages://inbox`), parameterised conversation transcripts (`messages://conversation/{selector}/{value}`), and contact cards (`messages://contact/{contactId}`). Codex can subscribe to these without calling tools; see [Resources](#resources) for payload details.
 
 ## Key Features
 
@@ -65,7 +65,7 @@ Helper scripts:
 - `pnpm run send -- "+1XXXXXXXXXX" "Hello"` – send a quick test message.
 - `pnpm run doctor` / `pnpm run doctor -- --json` – verify prerequisites.
 - Shell helpers in `scripts/` (useful outside pnpm):
-  - `scripts/mcp-stack.sh` – orchestrate the HTTP server plus an optional `mcpo` proxy (`start|stop|status|watch`). Defaults align to port 3338; override with `MESSAGES_MCP_PORT`.
+  - `scripts/mcp-stack.sh` – start/stop the Streamable HTTP server (`start|stop|status|watch`). Defaults align to port 3338; override with `MESSAGES_MCP_PORT`.
   - Deprecated shims: `mcp-http-start.sh`, `mcp-http-stop.sh`, `mcp-http-watch.sh` now forward to `mcp-stack.sh` to keep older workflows working. Prefer `mcp-stack.sh` directly.
 
 ### Which transport should I use?
@@ -73,7 +73,7 @@ Helper scripts:
 | Mode | When it shines | Notes |
 | ---- | --------------- | ----- |
 | `stdio` (default) | Local Codex CLI launches the server on demand. Simple auth story and fastest iteration loop. | Configure via `transport: "stdio"` (or omit the key). stdout stays pure JSON while stderr + rotating files capture logs. |
-| Streamable HTTP + SSE | Need persistent resources (`messages://inbox`, `messages://conversation/...`) or want to front the server with an authenticated proxy. | Enable with `transport: "http"` or `pnpm run start:http`. Lock down `MESSAGES_MCP_HTTP_ALLOWED_HOSTS` and review the example config for sane defaults. |
+| Streamable HTTP + SSE | Need persistent resources (`messages://inbox`, `messages://conversation/...`, `messages://contact/...`) or want to front the server with an authenticated proxy. | Enable with `transport: "http"` or `pnpm run start:http`. Lock down `MESSAGES_MCP_HTTP_ALLOWED_HOSTS` and review the example config for sane defaults. |
 
 ### Install via pnpm
 
@@ -120,8 +120,9 @@ Resources complement the tool surface by exposing read-only feeds that Codex (an
 | -------- | ----------- | ------- |
 | `messages://inbox` | Rolling snapshot of the most recent conversations with unread counts, participants, and the latest normalized message. The list is capped by `MESSAGES_MCP_INBOX_RESOURCE_LIMIT` (default 15). | JSON document `{ generated_at, total_conversations, total_unread, conversations[] }`. Each entry includes `chat_id`, `guid`, `display_name`, `participants[]`, `unread_count`, and `latest_message` (normalized schema shared with tools). |
 | `messages://conversation/{selector}/{value}` | Template that resolves a specific transcript. Supported selectors: `chat-id`, `chat-guid`, `chat-name`, and `participant`. The candidate list in `resources/list` is capped by `MESSAGES_MCP_CONVERSATION_LIST_LIMIT` (default 20). | JSON document `{ generated_at, selector, value, target, chat, messages[] }`. Messages are sorted oldest→newest and limited by `MESSAGES_MCP_CONVERSATION_RESOURCE_LIMIT` (default 60). |
+| `messages://contact/{contactId}` | Template exposing macOS Contacts entries when `MESSAGES_MCP_CONTACTS=1`. Returned contacts are capped by `MESSAGES_MCP_CONTACT_RESOURCE_LIMIT` (default 25). | JSON document `{ generated_at, resource_id, name, primary_phone, primary_email, phones[], emails[] }`. |
 
-The Streamable HTTP manifest advertises both endpoints, so Codex can call `resources/list` to discover the inbox plus curated conversation URIs, or `resources/templates/list` followed by `resources/read` to resolve arbitrary selectors.
+The Streamable HTTP manifest advertises all endpoints, so Codex can call `resources/list` to discover the inbox, curated conversations, and recent contacts, or `resources/templates/list` followed by `resources/read` to resolve arbitrary selectors.
 
 > Tip: the server expects HTTP clients to send `Accept: application/json, text/event-stream` during initialization. Codex CLI v0.46+ supports this via RMCP; update `~/.codex/config.toml` accordingly:
 > 
@@ -169,14 +170,14 @@ If a message body only exists in `attributedBody`, the MCP now decodes it into `
 
 Codex CLI v0.46+ can talk to this server over the [streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) transport. To try it locally:
 
-1. Start the stack (Messages MCP + optional mcpo proxy):
+1. Start the Streamable HTTP server:
 
    ```bash
    pnpm run build
-   MCPO_API_KEY=your-shared-secret scripts/mcp-stack.sh start
+   scripts/mcp-stack.sh start
    ```
 
-   By default the MCP transport binds to `http://127.0.0.1:8002/mcp` and the proxy listens on `http://127.0.0.1:9000`. Disable the proxy with `scripts/mcp-stack.sh start --no-mcpo`.
+   By default the transport binds to `http://127.0.0.1:3338/mcp`. Override the host or port with `MESSAGES_MCP_HOST` / `MESSAGES_MCP_PORT`.
 
 2. Update `~/.codex/config.toml`:
 
@@ -184,7 +185,7 @@ Codex CLI v0.46+ can talk to this server over the [streamable HTTP](https://mode
    experimental_use_rmcp_client = true
 
 [mcp_servers.messages]
-url = "http://127.0.0.1:8002/mcp"
+url = "http://127.0.0.1:3338/mcp"
 startup_timeout_sec = 20
 tool_timeout_sec = 60
    ```
@@ -217,8 +218,8 @@ Logs note every `send_text` / `send_attachment` attempt (masked recipients), eac
 - `MESSAGES_MCP_LOG_VIEWER=true` – toggle the built-in browser log viewer. When enabled the agent opens a single local tab with live log streaming and a shutdown button.
 - `MESSAGES_MCP_LOG_VIEWER_AUTO_OPEN=true` – disable to start the viewer server without automatically launching a browser tab.
 - `MESSAGES_MCP_LOG_VIEWER_MAX_CHUNK=262144` – override the maximum number of bytes returned per log poll (default ~256&nbsp;KiB).
+- `MESSAGES_MCP_LOG_VIEWER_PORT=3337` – pin the log viewer to a fixed port so repeated launches reuse the same browser tab (falls back to a random port if unavailable).
 - `MESSAGES_MCP_OSASCRIPT_MODE=file` – controls how AppleScript is invoked. The default (`file`) writes the script to a temporary `.applescript` file before calling `/usr/bin/osascript`, avoiding inline parsing quirks. Set to `inline` to revert to the legacy `-l AppleScript -e` behaviour.
-- `MESSAGES_MCP_HTTP_OIDC_*` – enable OAuth/OIDC protection for the HTTP transport. See [OAuth guard](#oauth-guard) for the full matrix.
 - Optional JSON config: place `messages-mcp.config.json` in the current directory (or point `MESSAGES_MCP_CONFIG` at a file). We also check `~/.config/messages-mcp.config.json`. Values in the config provide defaults for the same knobs as the environment variables (env/CLI still win).
 - A commented template lives at [`messages-mcp.config.json.example`](./messages-mcp.config.json.example); copy it next to your deployment and trim the `//` key once you are ready.
 - `MESSAGES_MCP_CONTACTS=0` – opt out of contact enrichment. By default `list_chats` annotates participants with contact names and the `search_contacts` tool is available.
@@ -229,31 +230,9 @@ Logs note every `send_text` / `send_attachment` attempt (masked recipients), eac
 - `MESSAGES_MCP_INBOX_RESOURCE_LIMIT=15` – cap the number of conversations returned by the inbox resource (bounds 5–50).
 - `MESSAGES_MCP_CONVERSATION_RESOURCE_LIMIT=60` – cap the message count returned by each conversation resource payload (bounds 10–200).
 - `MESSAGES_MCP_CONVERSATION_LIST_LIMIT=20` – cap how many conversation URIs appear in `resources/list` (bounds 5–100).
+- `MESSAGES_MCP_CONTACT_RESOURCE_LIMIT=25` – cap the number of contacts returned by the contact resource template (bounds 5–100).
 
-Grant Full Disk Access before running the server so SQLite reads succeed. Without it, `doctor` will warn and send tools will fail silently in Messages.app.
-
-### OAuth guard
-
-Set `MESSAGES_MCP_HTTP_OIDC_ENABLED=true` to wrap the HTTP transport with `express-openid-connect`. This adds login, callback, and logout routes plus a lightweight session endpoint (default: `/auth/session`). Requests to `/mcp` (and `/sse`/`/messages` if the SSE fallback is enabled) must complete an OAuth flow before traffic reaches the MCP transports.
-
-Required environment variables:
-
-- `MESSAGES_MCP_HTTP_OIDC_ISSUER_BASE_URL` – OIDC issuer (e.g. `https://YOUR_DOMAIN.auth0.com`, `https://accounts.google.com`).
-- `MESSAGES_MCP_HTTP_OIDC_BASE_URL` – the externally reachable base URL for this server (e.g. `https://mcp.example.com`). Use the reverse proxy origin.
-- `MESSAGES_MCP_HTTP_OIDC_CLIENT_ID` – OIDC client/application ID.
-- `MESSAGES_MCP_HTTP_OIDC_SESSION_SECRET` – 32+ character secret for cookie encryption.
-
-Optional knobs:
-
-- `MESSAGES_MCP_HTTP_OIDC_CLIENT_SECRET` – supply when your provider requires a confidential client.
-- `MESSAGES_MCP_HTTP_OIDC_SCOPE` (default `openid profile email`) and `MESSAGES_MCP_HTTP_OIDC_AUDIENCE` – request extra identity/API claims.
-- `MESSAGES_MCP_HTTP_OIDC_AUTH_REQUIRED` – set `true` to make every route (including `/health`) require authentication; by default only MCP endpoints are guarded.
-- `MESSAGES_MCP_HTTP_OIDC_PROTECT_HEALTH` – require auth for `/health` without forcing `AUTH_REQUIRED=true`.
-- `MESSAGES_MCP_HTTP_OIDC_TRUST_PROXY` – numeric hop count passed to `app.set("trust proxy", value)` (default `1`) for TLS-terminating proxies.
-- `MESSAGES_MCP_HTTP_OIDC_SESSION_PATH` – override the session introspection route (set to empty string to disable).
-- `MESSAGES_MCP_HTTP_OIDC_IDP_LOGOUT` – set `true` to propagate logout to the identity provider when calling `/logout`.
-
-Behind an HTTPS reverse proxy, expose `/mcp` (and `/login`, `/callback`, `/logout`) publicly, force TLS at the proxy, and ensure cookies are preserved end-to-end. The guard skips CORS pre-flight OPTIONS requests, so browsers can still negotiate HTTP transports.
+- Grant Full Disk Access before running the server so SQLite reads succeed. Without it, `doctor` will warn and send tools will fail silently in Messages.app.
 
 ### SSH tunnels and allowed hosts
 

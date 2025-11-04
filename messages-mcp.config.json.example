@@ -12,6 +12,7 @@
   "logViewer": {
     "enabled": true,
     "autoOpen": true,
-    "pollIntervalMs": 2000
+    "pollIntervalMs": 2000,
+    "port": 3337
   }
 }

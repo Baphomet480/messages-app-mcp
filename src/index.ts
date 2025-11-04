@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import express, { type Request, type Response, type RequestHandler } from "express";
+import express, { type Request, type Response } from "express";
 import cors from "cors";
-import type { ConfigParams } from "express-openid-connect";
-import * as expressOpenIdConnect from "express-openid-connect";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
@@ -65,8 +63,6 @@ import {
   buildContactPayload,
   toContactResourceData,
 } from "./utils/contact-resource.js";
-
-const { auth, requiresAuth } = expressOpenIdConnect;
 const logger = getLogger();
 
 type BasicLoggingLevel = Extract<LoggingLevel, "debug" | "info" | "warning" | "error">;
@@ -348,28 +344,43 @@ type LogViewerSettings = {
   enabled: boolean;
   autoOpen: boolean;
   pollIntervalMs?: number;
+  port?: number;
 };
 
 const envLogViewerEnabledRaw = process.env.MESSAGES_MCP_LOG_VIEWER;
 const envLogViewerAutoOpenRaw = process.env.MESSAGES_MCP_LOG_VIEWER_AUTO_OPEN;
 const envLogViewerPollRaw = process.env.MESSAGES_MCP_LOG_VIEWER_POLL_INTERVAL;
+const envLogViewerPortRaw = process.env.MESSAGES_MCP_LOG_VIEWER_PORT;
 
 const logViewerEnvOverrides = {
   enabled: envLogViewerEnabledRaw != null,
   autoOpen: envLogViewerAutoOpenRaw != null,
   pollInterval: envLogViewerPollRaw != null,
+  port: envLogViewerPortRaw != null,
 };
 
 const logViewerSettings: LogViewerSettings = {
   enabled: logViewerEnvOverrides.enabled ? parseEnvBool("MESSAGES_MCP_LOG_VIEWER", true) : true,
   autoOpen: logViewerEnvOverrides.autoOpen ? parseEnvBool("MESSAGES_MCP_LOG_VIEWER_AUTO_OPEN", true) : true,
   pollIntervalMs: undefined,
+  port: undefined,
 };
 
 if (logViewerEnvOverrides.pollInterval) {
   const parsedPoll = Number.parseInt(envLogViewerPollRaw ?? "", 10);
   if (Number.isFinite(parsedPoll)) {
     logViewerSettings.pollIntervalMs = clampNumber(parsedPoll, 250, 120000);
+  }
+}
+
+if (logViewerEnvOverrides.port) {
+  const parsedPort = Number.parseInt(envLogViewerPortRaw ?? "", 10);
+  if (Number.isFinite(parsedPort)) {
+    if (parsedPort === 0) {
+      logViewerSettings.port = 0;
+    } else if (parsedPort > 0) {
+      logViewerSettings.port = clampNumber(parsedPort, 1, 65535);
+    }
   }
 }
 
@@ -388,6 +399,13 @@ function applyConfigToLogViewer(config: MessagesConfig): void {
   if (!logViewerEnvOverrides.pollInterval && typeof cfg.pollIntervalMs === "number" && Number.isFinite(cfg.pollIntervalMs)) {
     logViewerSettings.pollIntervalMs = clampNumber(Math.floor(cfg.pollIntervalMs), 250, 120000);
   }
+  if (!logViewerEnvOverrides.port && typeof cfg.port === "number" && Number.isFinite(cfg.port)) {
+    if (cfg.port === 0) {
+      logViewerSettings.port = 0;
+    } else if (cfg.port > 0) {
+      logViewerSettings.port = clampNumber(Math.floor(cfg.port), 1, 65535);
+    }
+  }
 }
 
 async function ensureLogViewer(initialLabel = "logs"): Promise<void> {
@@ -400,6 +418,7 @@ async function ensureLogViewer(initialLabel = "logs"): Promise<void> {
           autoOpen: logViewerSettings.autoOpen,
           sessionLabel: initialLabel,
           pollIntervalMs: logViewerSettings.pollIntervalMs,
+          port: logViewerSettings.port,
           onShutdownRequest: () => {
             logger.warn("log_viewer_shutdown_requested");
             process.nextTick(() => {
@@ -538,76 +557,6 @@ function buildDefaultCorsOrigins(host: string, port: number): string[] {
     addOrigin("http", "localhost");
   }
   return [...set];
-}
-
-type OAuthRuntimeConfig = {
-  authOptions: ConfigParams;
-  trustProxy: number;
-  protectHealth: boolean;
-  sessionInfoPath: string | null;
-};
-
-function loadOAuthRuntimeConfig(): OAuthRuntimeConfig | null {
-  const enabled = parseEnvBool("MESSAGES_MCP_HTTP_OIDC_ENABLED", false);
-  if (!enabled) {
-    return null;
-  }
-
-  const issuerBaseURL = process.env.MESSAGES_MCP_HTTP_OIDC_ISSUER_BASE_URL?.trim();
-  const baseURL = process.env.MESSAGES_MCP_HTTP_OIDC_BASE_URL?.trim();
-  const clientID = process.env.MESSAGES_MCP_HTTP_OIDC_CLIENT_ID?.trim();
-  const clientSecret = process.env.MESSAGES_MCP_HTTP_OIDC_CLIENT_SECRET?.trim();
-  const sessionSecret = process.env.MESSAGES_MCP_HTTP_OIDC_SESSION_SECRET?.trim();
-  const scope = process.env.MESSAGES_MCP_HTTP_OIDC_SCOPE?.trim() || "openid profile email";
-  const audience = process.env.MESSAGES_MCP_HTTP_OIDC_AUDIENCE?.trim();
-  const authRequired = parseEnvBool("MESSAGES_MCP_HTTP_OIDC_AUTH_REQUIRED", false);
-  const idpLogout = parseEnvBool("MESSAGES_MCP_HTTP_OIDC_IDP_LOGOUT", false);
-  const trustProxy = parseEnvInt("MESSAGES_MCP_HTTP_OIDC_TRUST_PROXY", 1, 0, 100);
-  const protectHealth = parseEnvBool("MESSAGES_MCP_HTTP_OIDC_PROTECT_HEALTH", false);
-  const rawSessionInfoPath = process.env.MESSAGES_MCP_HTTP_OIDC_SESSION_PATH;
-  const sessionInfoPath = rawSessionInfoPath?.trim()
-    ? rawSessionInfoPath.trim()
-    : "/auth/session";
-
-  const missing: string[] = [];
-  if (!issuerBaseURL) missing.push("MESSAGES_MCP_HTTP_OIDC_ISSUER_BASE_URL");
-  if (!baseURL) missing.push("MESSAGES_MCP_HTTP_OIDC_BASE_URL");
-  if (!clientID) missing.push("MESSAGES_MCP_HTTP_OIDC_CLIENT_ID");
-  if (!sessionSecret) missing.push("MESSAGES_MCP_HTTP_OIDC_SESSION_SECRET");
-
-  if (missing.length) {
-    throw new Error(
-      `OAuth is enabled but required environment variables are missing: ${missing.join(", ")}`,
-    );
-  }
-
-  const normalizedBaseURL = baseURL!.endsWith("/") ? baseURL!.slice(0, -1) : baseURL!;
-
-  const authorizationParams: Record<string, string> = {
-    response_type: "code",
-    scope,
-  };
-  if (audience) {
-    authorizationParams.audience = audience;
-  }
-
-  const authOptions: ConfigParams = {
-    authRequired,
-    issuerBaseURL: issuerBaseURL!,
-    baseURL: normalizedBaseURL,
-    clientID: clientID!,
-    clientSecret: clientSecret || undefined,
-    secret: sessionSecret!,
-    idpLogout,
-    authorizationParams,
-  };
-
-  return {
-    authOptions,
-    trustProxy,
-    protectHealth,
-    sessionInfoPath: sessionInfoPath && sessionInfoPath.length ? sessionInfoPath : null,
-  };
 }
 
 const DEFAULT_SEARCH_DAYS_BACK = parseEnvInt("MESSAGES_MCP_DEFAULT_DAYS_BACK", 30, 1, 365);
@@ -1047,6 +996,7 @@ const sendTargetDescriptorSchema = z.object({
   chat_guid: z.string().nullable(),
   chat_name: z.string().nullable(),
   display: z.string(),
+  contact_name: z.string().nullable().optional(),
 });
 
 const sendSuccessSchema = z.object({
@@ -1054,8 +1004,8 @@ const sendSuccessSchema = z.object({
   summary: z.string(),
   target: sendTargetDescriptorSchema,
   chat_id: z.number().nullable().optional(),
-  latest_message: normalizedMessageSchema.nullable().optional(),
-  recent_messages: z.array(normalizedMessageSchema).optional(),
+  latest_message: z.any().optional(),
+  recent_messages: z.array(z.any()).optional(),
   lookup_error: z.string().optional(),
   route: z.enum(["imessage", "sms", "rcs", "unknown"]).nullable().optional(),
 });
@@ -1081,8 +1031,8 @@ const sendStandardOutputSchema = z.object({
   summary: z.string(),
   target: sendTargetDescriptorSchema,
   chat_id: z.number().nullable().optional(),
-  latest_message: normalizedMessageSchema.nullable().optional(),
-  recent_messages: z.array(normalizedMessageSchema).optional(),
+  latest_message: z.any().optional(),
+  recent_messages: z.array(z.any()).optional(),
   error: z.string().nullable().optional(),
   lookup_error: z.string().optional(),
   attachment: attachmentMetaSchema.optional(),
@@ -1226,6 +1176,396 @@ const CONNECTOR_MANIFEST_TOOLS: Array<{ name: string; description: string }> = [
   },
 ];
 
+type DocumentationLink = {
+  label: string;
+  url: string;
+};
+
+type DocumentationExample = {
+  name: string;
+  description?: string;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+};
+
+type DocumentationDetails = {
+  summary: string;
+  usage?: string[];
+  inputs?: Record<string, string>;
+  outputs?: Record<string, string>;
+  notes?: string[];
+  environment?: string[];
+  examples?: DocumentationExample[];
+  links?: DocumentationLink[];
+};
+
+function buildDocumentationMeta(details: DocumentationDetails): Record<string, unknown> {
+  const documentation: Record<string, unknown> = {
+    summary: details.summary,
+  };
+  if (details.usage?.length) documentation.usage = details.usage;
+  if (details.inputs && Object.keys(details.inputs).length > 0) documentation.inputs = details.inputs;
+  if (details.outputs && Object.keys(details.outputs).length > 0) documentation.outputs = details.outputs;
+  if (details.environment?.length) documentation.environment = details.environment;
+  if (details.notes?.length) documentation.notes = details.notes;
+  if (details.examples?.length) documentation.examples = details.examples;
+  const links = [...(details.links ?? [])];
+  if (!links.some((link) => link.url === CONNECTOR_DEFAULT_DOCS_URL)) {
+    links.push({ label: "Connector README", url: CONNECTOR_DEFAULT_DOCS_URL });
+  }
+  if (links.length) documentation.links = links;
+  return { documentation };
+}
+
+const TOOL_DOCUMENTATION = {
+  send_text: {
+    summary: "Send a text-only message through macOS Messages.",
+    usage: [
+      "Run the `doctor` tool first to confirm AppleScript and database access.",
+      "Provide `text` plus at least one of `recipient`, `chat_guid`, or `chat_name` to target a thread.",
+      "Expect a structured delivery report describing route, transcript excerpts, and any warnings.",
+    ],
+    notes: [
+      "Honors `MESSAGES_MCP_READONLY` and surfaces masked recipients when `MESSAGES_MCP_MASK_RECIPIENTS` is set.",
+      "Requires macOS Messages with an active account and Full Disk Access for the invoking shell.",
+    ],
+    environment: [
+      "MESSAGES_MCP_READONLY disables sending while keeping diagnostics available.",
+      "MESSAGES_MCP_MASK_RECIPIENTS replaces phone numbers with masked output in responses and logs.",
+    ],
+  },
+  send_attachment: {
+    summary: "Send a file attachment with an optional caption via Messages.",
+    usage: [
+      "Call after verifying prerequisites with the `doctor` tool.",
+      "Provide `file_path` plus a chat target (`recipient`, `chat_guid`, or `chat_name`); include `caption` when desired.",
+      "Use when you need the same structured delivery payload as `send_text`, augmented with attachment metadata.",
+    ],
+    notes: [
+      "Skips sending in read-only mode and reports a descriptive error.",
+      "Captures attachment labels and resolved paths in the structured response for auditing.",
+    ],
+    environment: [
+      "Requires the file to be readable from the invoking process with Full Disk Access.",
+      "Relies on macOS Messages to support the transport for large files.",
+    ],
+  },
+  applescript_handler_template: {
+    summary: "Generate an AppleScript handler skeleton for Messages event automation.",
+    usage: [
+      "Call to retrieve the script body; save it to `~/Library/Application Scripts/com.apple.iChat/messages-mcp.scpt`.",
+      "Set `minimal` to true to strip inline comments before saving.",
+    ],
+    notes: [
+      "Handlers log inbound and outbound messages by default; customize the script before deploying to production.",
+      "Messages must allow AppleScript execution and the script must be enabled in Messages preferences.",
+    ],
+  },
+  doctor: {
+    summary: "Diagnose whether this host can control Messages and read chat history.",
+    usage: [
+      "Run before attempting to send or when troubleshooting delivery failures.",
+      "Review `notes` in the structured response for remediation guidance (e.g., Full Disk Access).",
+    ],
+    notes: [
+      "Performs read-only validation of AppleScript availability, services, and database paths.",
+      "Useful for CI/CD health probes because it exits quickly and returns deterministic output.",
+    ],
+  },
+  about: {
+    summary: "Return connector identity information for logging, support, or change tracking.",
+    usage: [
+      "Call to confirm which version of messages-app-mcp is running before filing an issue.",
+      "Record the `generated_at` timestamp alongside logs for reproducibility.",
+    ],
+    notes: [
+      "Includes git commit metadata when the repository has been built from source.",
+      "Reports Node.js runtime and platform to help reproduce environment-specific bugs.",
+    ],
+  },
+  messaging_capabilities: {
+    summary: "Describe available delivery channels and associated tools exposed by this MCP server.",
+    usage: [
+      "Use to brief upstream agents about supported transports before planning a workflow.",
+      "Read the `requirements` list to verify environment assumptions (Full Disk Access, signed-in accounts, etc.).",
+    ],
+    notes: [
+      "Outputs curated guidance on when to call `send_text` vs `send_attachment` and related fetch helpers.",
+      "Channel descriptions document how SMS, RCS, and iMessage behave on modern macOS builds.",
+    ],
+  },
+  list_chats: {
+    summary: "Enumerate recent Messages chats with participant metadata and unread counts.",
+    usage: [
+      "Specify `participant` or `updated_after_unix_ms` to limit the dataset for large histories.",
+      "Set `unread_only` to true when surfacing actionable inbox items.",
+      "Use the returned `chat_id` or `guid` with follow-up tools such as `get_messages`.",
+    ],
+    notes: [
+      "Contact enrichment is applied automatically when `MESSAGES_MCP_CONTACTS` is enabled.",
+      "Requires Full Disk Access to read chat.db and is read-only safe to call frequently.",
+    ],
+  },
+  get_messages: {
+    summary: "Fetch normalized messages for a specific chat or participant, with optional context windowing.",
+    usage: [
+      "Provide either `chat_id` or `participant`; both cannot be omitted.",
+      "Supply `context_anchor_rowid` plus `context_before`/`context_after` to stitch surrounding messages.",
+      "Use `context_include_attachments_meta` when downstream consumers need attachment hints.",
+    ],
+    notes: [
+      "Outputs normalized payloads that align with search and fetch tools for easy composition.",
+      "Returns messages sorted chronologically to simplify conversation rendering.",
+    ],
+  },
+  recent_messages_by_participant: {
+    summary: "Return the latest messages exchanged with a single phone number or email handle.",
+    usage: [
+      "Call before sending to refresh recent history for a specific participant.",
+      "Toggle `include_attachments_meta` when attachment hints are required.",
+    ],
+    notes: [
+      "Provides the same normalized structure as `get_messages` but without chat identification overhead.",
+    ],
+  },
+  search_contacts: {
+    summary: "Look up macOS Contacts entries for enrichment and validation.",
+    usage: [
+      "Enable contact access by setting `MESSAGES_MCP_CONTACTS=1` before invoking.",
+      "Provide partial names, phone numbers, or emails in `query`; limit results with `limit`.",
+    ],
+    notes: [
+      "Returns phones and emails ready to feed into `send_text` or targeting helpers.",
+      "Falls back with a descriptive error if contact lookups are disabled or unavailable.",
+    ],
+  },
+  list_accounts: {
+    summary: "List Messages accounts with their service type and connection status.",
+    usage: [
+      "Call during setup to confirm which transports (SMS, iMessage, RCS) are reachable.",
+      "Log the response when diagnosing login issues or Apple ID state.",
+    ],
+    notes: [
+      "Output mirrors Messages preferences and is safe to call repeatedly.",
+    ],
+  },
+  list_participants: {
+    summary: "Expose cached participant handles with optional text filtering.",
+    usage: [
+      "Provide `filter` to narrow results by name or handle substring.",
+      "Use `limit` to cap returned entries when presenting suggestions to end users.",
+    ],
+    notes: [
+      "Data originates from chat.db and reflects recent conversation participants.",
+    ],
+  },
+  login_accounts: {
+    summary: "Instruct Messages to sign into every configured account.",
+    usage: [
+      "Use after provisioning a new environment or when the doctor tool reports accounts offline.",
+      "Expect the call to return before Messages finishes establishing connections.",
+    ],
+    notes: [
+      "Requires interactive permissions; Messages may still prompt the user on first login.",
+      "Pairs with `list_accounts` to confirm whether reconnection succeeded.",
+    ],
+  },
+  logout_accounts: {
+    summary: "Sign out of all Messages accounts from automation.",
+    usage: [
+      "Invoke prior to maintenance windows or when rotating credentials.",
+      "Check the structured response to confirm the logout command was dispatched.",
+    ],
+    notes: [
+      "Leaves it to Messages to complete logout asynchronously; follow up with `list_accounts`.",
+    ],
+  },
+  list_file_transfers: {
+    summary: "Inspect current (and optionally completed) Messages file transfers.",
+    usage: [
+      "Call without arguments to monitor active inbound or outbound transfers.",
+      "Set `include_finished` to true to audit recently completed transfers; cap volume with `limit`.",
+    ],
+    notes: [
+      "Surfaces progress percentages and resolved file paths for downstream archival.",
+    ],
+  },
+  accept_file_transfer: {
+    summary: "Accept a pending Messages file transfer by identifier.",
+    usage: [
+      "Retrieve candidate IDs from `list_file_transfers` before calling.",
+      "Reuse the structured response to confirm acceptance status and updated transfer metadata.",
+    ],
+    notes: [
+      "Returns `isError: true` when the transfer is missing or fails to accept.",
+    ],
+  },
+  search_messages: {
+    summary: "Perform scoped message searches with explicit chat, participant, or time filters.",
+    usage: [
+      "Provide `chat_id`, `participant`, or `from_unix_ms`/`to_unix_ms` to bound the search.",
+      "Use `from_me` and `has_attachments` to refine sender and attachment criteria.",
+      "Paginate with `limit` and `offset` when iterating through larger result sets.",
+    ],
+    notes: [
+      "Rejects unbounded queries to protect performance and guide callers toward precise filters.",
+      "Returns normalized messages enriched with snippets for quick display.",
+    ],
+  },
+  history_by_days: {
+    summary: "Fetch recent history for a chat or participant over a rolling day window.",
+    usage: [
+      "Provide `chat_id` or `participant` along with `days_back` to define the time horizon.",
+      "Adjust `limit` for tighter summaries and set `include_attachments_meta` when required.",
+    ],
+    notes: [
+      "Ideal for summarizing recent activity without crafting full-text searches.",
+    ],
+  },
+  search: {
+    summary: "Connector-friendly search that auto-refines queries and returns snippet documents.",
+    usage: [
+      "Pass the raw user query; optional `chat_guid`, `participant`, and `days_back` tighten scope.",
+      "Leverage returned `metadata.chat_id` with `fetch` or `context_around_message` for follow-up.",
+      "Expect AI-assisted refinement when the server can suggest better filters.",
+    ],
+    notes: [
+      "Designed for ChatGPT native connectors and other MCP clients that expect document-style responses.",
+      "Includes attachment-derived snippets when messages lack text content.",
+    ],
+  },
+  fetch: {
+    summary: "Return a single message document plus optional context lines for connectors.",
+    usage: [
+      "Specify an identifier from `search` results (e.g., `message:12345`).",
+      "Tune `context_before` and `context_after` to balance transcript length and token budget.",
+      "Review `resourceLinks` (when provided) for direct attachment URIs.",
+    ],
+    notes: [
+      "Outputs a consistent document shape suitable for ChatGPT Retrieval connectors.",
+      "Handles missing messages gracefully with descriptive error documents.",
+    ],
+  },
+  context_around_message: {
+    summary: "Retrieve a bounded window of messages around a specific `message_rowid`.",
+    usage: [
+      "Set `before` and `after` counts to control window size.",
+      "Enable `include_attachments_meta` when downstream processing needs attachment hints.",
+    ],
+    notes: [
+      "Results mirror the normalized schema used by other history tools for easy reuse.",
+    ],
+  },
+  get_attachments: {
+    summary: "Return attachment metadata and resolved paths for selected messages.",
+    usage: [
+      "Provide the list of `message_rowids` you plan to inspect.",
+      "Adjust `per_message_cap` to limit how many attachments are returned per message.",
+    ],
+    notes: [
+      "Helps inventory attachments before downloading or copying files from disk.",
+    ],
+  },
+  search_messages_safe: {
+    summary: "Run a guarded message search that enforces scoped filters or a recent-day window.",
+    usage: [
+      "Provide `chat_id` or `participant`, or fall back to `days_back` when scope is absent.",
+      "Use `from_me`, `has_attachments`, and pagination arguments to manage result volume.",
+      "Enable `include_attachments_meta` to surface attachment hints alongside matches.",
+    ],
+    notes: [
+      "Rejects unscoped queries to prevent accidental full-database scans.",
+      "Shares the same normalized output structure as `search_messages` for compatibility.",
+    ],
+  },
+  summarize_window: {
+    summary: "Produce a compact summary and sample lines around a message anchor.",
+    usage: [
+      "Supply `message_rowid` plus `before` and `after` window sizes to shape the transcript.",
+      "Control output length with `max_chars` when passing summaries to language models.",
+    ],
+    notes: [
+      "Outputs both a high-level summary and trimmed conversation lines for inspection.",
+    ],
+  },
+} satisfies Record<
+  | "send_text"
+  | "send_attachment"
+  | "applescript_handler_template"
+  | "doctor"
+  | "about"
+  | "messaging_capabilities"
+  | "list_chats"
+  | "get_messages"
+  | "recent_messages_by_participant"
+  | "search_contacts"
+  | "list_accounts"
+  | "list_participants"
+  | "login_accounts"
+  | "logout_accounts"
+  | "list_file_transfers"
+  | "accept_file_transfer"
+  | "search_messages"
+  | "history_by_days"
+  | "search"
+  | "fetch"
+  | "context_around_message"
+  | "get_attachments"
+  | "search_messages_safe"
+  | "summarize_window",
+  DocumentationDetails
+>;
+
+type ToolDocumentationKey = keyof typeof TOOL_DOCUMENTATION;
+
+function toolMeta(name: ToolDocumentationKey): Record<string, unknown> {
+  return buildDocumentationMeta(TOOL_DOCUMENTATION[name]);
+}
+
+const RESOURCE_DOCUMENTATION = {
+  inbox: {
+    summary: "JSON snapshot of the most active Messages conversations and aggregate inbox metrics.",
+    usage: [
+      "Read to surface recent chats, unread counts, and top-level participants in one call.",
+      "Use `conversation` resources to drill into individual threads that appear here.",
+    ],
+    notes: [
+      "Useful for dashboards or agent priming that need a quick overview before deeper queries.",
+    ],
+    outputs: {
+      text: "JSON payload containing conversation summaries, unread totals, and routing hints.",
+    },
+  },
+  conversation: {
+    summary: "Normalized transcript for a single Messages conversation selected via URI template variables.",
+    usage: [
+      "Fill the template path segments with `selector` (chat-id/guid/participant) and `value`.",
+      "Inspect the returned `messages` array for timeline analysis and sending context.",
+      "Leverage `lookupError` fields to understand when participant resolution fails.",
+    ],
+    notes: [
+      "Pairs with `list_chats` and `get_messages` for deterministic conversation retrieval.",
+    ],
+  },
+  contact: {
+    summary: "Normalized contact record derived from macOS Contacts.",
+    usage: [
+      "Encode or decode contact identifiers with helper utilities when linking to resources.",
+      "Call after enabling contact access to retrieve phones and emails for targeting.",
+      "Use alongside `search_contacts` to hydrate agent prompt context with confirmed handles.",
+    ],
+    notes: [
+      "Returns phone numbers and emails in a JSON structure ready for downstream enrichment.",
+    ],
+  },
+} satisfies Record<"inbox" | "conversation" | "contact", DocumentationDetails>;
+
+type ResourceDocumentationKey = keyof typeof RESOURCE_DOCUMENTATION;
+
+function resourceMeta(name: ResourceDocumentationKey): Record<string, unknown> {
+  return buildDocumentationMeta(RESOURCE_DOCUMENTATION[name]);
+}
+
 type ToolResourceLink = {
   type: "resource_link";
   uri: string;
@@ -1323,6 +1663,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: false,
         openWorldHint: true,
       },
+      _meta: toolMeta("send_text"),
     },
     async ({ recipient, chat_guid, chat_name, text }) => {
       const base = { recipient, chat_guid, chat_name };
@@ -1443,6 +1784,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: false,
         openWorldHint: true,
       },
+      _meta: toolMeta("send_attachment"),
     },
     async ({ recipient, chat_guid, chat_name, file_path, caption }) => {
       const base = { recipient, chat_guid, chat_name };
@@ -1553,6 +1895,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("applescript_handler_template"),
     },
     async ({ minimal }) => {
       const script = renderHandlerTemplate(Boolean(minimal));
@@ -1587,6 +1930,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("doctor"),
     },
     async () => {
       const report = await runDoctor();
@@ -1621,6 +1965,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("about"),
     },
     async () => {
       const version = await getVersionInfo();
@@ -1672,6 +2017,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("messaging_capabilities"),
     },
     async () => {
       const payload = {
@@ -1781,6 +2127,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("list_chats"),
     },
     async ({ limit, participant, updated_after_unix_ms, unread_only }) => {
       try {
@@ -1901,6 +2248,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("get_messages"),
     },
     async ({
       chat_id,
@@ -1997,6 +2345,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("recent_messages_by_participant"),
     },
     async ({ participant, limit, include_attachments_meta }) => {
       try {
@@ -2058,6 +2407,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("search_contacts"),
     },
     async ({ query, limit }) => {
       if (!contactsFeatureEnabled()) {
@@ -2103,6 +2453,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("list_accounts"),
     },
     async () => {
       try {
@@ -2156,6 +2507,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("list_participants"),
     },
     async ({ filter, limit }) => {
       try {
@@ -2194,6 +2546,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: false,
         openWorldHint: true,
       },
+      _meta: toolMeta("login_accounts"),
     },
     async () => {
       try {
@@ -2226,6 +2579,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: false,
         openWorldHint: true,
       },
+      _meta: toolMeta("logout_accounts"),
     },
     async () => {
       try {
@@ -2286,6 +2640,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("list_file_transfers"),
     },
     async ({ include_finished, limit }) => {
       try {
@@ -2344,6 +2699,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: false,
         openWorldHint: true,
       },
+      _meta: toolMeta("accept_file_transfer"),
     },
     async ({ id }) => {
       try {
@@ -2434,6 +2790,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("search_messages"),
     },
     async (input) => {
       if (input.chat_id == null && !input.participant && input.from_unix_ms == null && input.to_unix_ms == null) {
@@ -2564,6 +2921,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("history_by_days"),
     },
     async ({ chat_id, participant, days_back, limit, include_attachments_meta }) => {
       if (chat_id == null && !participant) {
@@ -2668,6 +3026,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("search"),
     },
     async ({ query, chat_guid, participant, days_back, limit }) => {
       const trimmedQuery = query.trim();
@@ -2887,6 +3246,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("fetch"),
     },
     async ({ id, context_before, context_after }) => {
       const normalizedId = String(id).trim();
@@ -3046,6 +3406,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("context_around_message"),
     },
     async ({ message_rowid, before, after, include_attachments_meta }) => {
       const rows = await contextAroundMessage(message_rowid, before, after, !!include_attachments_meta);
@@ -3087,6 +3448,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("get_attachments"),
     },
     async ({ message_rowids, per_message_cap }) => {
       try {
@@ -3164,6 +3526,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("search_messages_safe"),
     },
     async (input) => {
       if (input.chat_id == null && !input.participant && !(input.days_back && input.days_back > 0)) {
@@ -3276,6 +3639,7 @@ function createConfiguredServer(): McpServer {
         readOnlyHint: true,
         openWorldHint: false,
       },
+      _meta: toolMeta("summarize_window"),
     },
     async ({ message_rowid, before, after, max_chars }) => {
       const rows = await contextAroundMessage(message_rowid, before, after, false);
@@ -3326,6 +3690,7 @@ function createConfiguredServer(): McpServer {
       title: "Inbox Snapshot",
       description: "Latest conversations across Messages with their most recent activity.",
       mimeType: "application/json",
+      _meta: resourceMeta("inbox"),
     },
     async () => {
       const snapshot = await buildInboxSnapshot(INBOX_RESOURCE_LIMIT);
@@ -3376,6 +3741,7 @@ function createConfiguredServer(): McpServer {
           last_message_iso: lastIso,
           participants,
           unread_count: unreadCount,
+          _meta: resourceMeta("conversation"),
         };
       });
       return { resources };
@@ -3389,6 +3755,7 @@ function createConfiguredServer(): McpServer {
       title: "Conversation Transcript",
       description: "Detailed transcript for an individual Messages chat.",
       mimeType: "application/json",
+      _meta: resourceMeta("conversation"),
     },
     async (uri, variables) => {
       const selector = (variables?.selector ?? variables?.Selector ?? "").toString();
@@ -3421,32 +3788,8 @@ function createConfiguredServer(): McpServer {
         mcpLog.debug("contact_resources_disabled");
         return { resources: [] };
       }
-      try {
-        const results = await contactsSearch("", CONTACT_RESOURCE_LIST_LIMIT);
-        const seen = new Set<string>();
-        const resources = results.map((entry) => {
-          const data = toContactResourceData(entry);
-          const contactId = encodeContactResourceId(data);
-          if (seen.has(contactId)) {
-            return null;
-          }
-          seen.add(contactId);
-          const description = buildContactDescription(data);
-          return {
-            uri: `messages://contact/${contactId}`,
-            name: data.name,
-            title: `Contact: ${data.name}`,
-            description,
-            mimeType: "application/json",
-          };
-        }).filter((value): value is NonNullable<typeof value> => value !== null);
-        mcpLog.debug("contact_resources_listed", { count: resources.length });
-        return { resources };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        mcpLog.error("contact_resources_list_failed", { error: message });
-        return { resources: [] };
-      }
+      mcpLog.debug("contact_resources_listing_skipped");
+      return { resources: [] };
     },
   });
 
@@ -3457,6 +3800,7 @@ function createConfiguredServer(): McpServer {
       title: "Contact Details",
       description: "macOS Contacts entry with phone numbers and email addresses.",
       mimeType: "application/json",
+      _meta: resourceMeta("contact"),
     },
     async (uri) => {
       const id = uri.pathname.replace(/^\//, "");
@@ -3496,62 +3840,6 @@ type HttpLaunchOptions = {
 };
 
 type LaunchOptions = { mode: "stdio" } | HttpLaunchOptions;
-
-type OAuthSetupResult = {
-  guard: RequestHandler;
-  protectHealth: boolean;
-};
-
-function configureOAuth(app: express.Express): OAuthSetupResult | null {
-  let config: OAuthRuntimeConfig | null = null;
-  try {
-    config = loadOAuthRuntimeConfig();
-  } catch (error) {
-    logger.error("Failed to initialize OAuth configuration", error);
-    throw error;
-  }
-
-  if (!config) {
-    return null;
-  }
-
-  const { authOptions, trustProxy, protectHealth, sessionInfoPath } = config;
-
-  logger.info("OAuth protection enabled for HTTP server", {
-    issuer: authOptions.issuerBaseURL,
-    baseURL: authOptions.baseURL,
-    authRequired: authOptions.authRequired ?? false,
-    protectHealth,
-  });
-
-  if (trustProxy > 0) {
-    app.set("trust proxy", trustProxy);
-  }
-
-  app.use(auth(authOptions));
-
-  const rawGuard = requiresAuth();
-  const guard: RequestHandler = (req, res, next) => {
-    if (req.method === "OPTIONS") {
-      next();
-      return;
-    }
-    rawGuard(req, res, next);
-  };
-
-  if (sessionInfoPath) {
-    app.get(sessionInfoPath, guard, (req: Request, res: Response) => {
-      const authenticated = req.oidc?.isAuthenticated?.() ?? false;
-      res.json({
-        authenticated,
-        user: req.oidc?.user ?? null,
-        idTokenClaims: req.oidc?.idTokenClaims ?? null,
-      });
-    });
-  }
-
-  return { guard, protectHealth };
-}
 
 function parseLaunchOptions(config?: MessagesConfig): LaunchOptions {
   const args = process.argv.slice(2);
@@ -3747,19 +4035,6 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
     }));
   }
 
-  const oauthSetup = configureOAuth(app);
-  const authGuard = oauthSetup?.guard ?? null;
-  if (authGuard) {
-    app.use("/mcp", authGuard);
-    if (options.enableSseFallback) {
-      app.use("/messages", authGuard);
-      app.use("/sse", authGuard);
-    }
-    if (oauthSetup?.protectHealth) {
-      app.use("/health", authGuard);
-    }
-  }
-
   const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: McpServer }>();
   const legacySessions = new Map<string, { transport: SSEServerTransport; server: McpServer }>();
 
@@ -3795,7 +4070,7 @@ async function runHttpServer(options: HttpLaunchOptions): Promise<void> {
         termsOfServiceUrl: CONNECTOR_DEFAULT_TOS_URL,
       },
       security: {
-        authentication: authGuard ? "oauth" : "none",
+        authentication: "none",
       },
       transport: {
         type: "streamable-http" as const,

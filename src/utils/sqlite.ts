@@ -29,6 +29,7 @@ export type MessageRow = {
   date: number | null; // Apple epoch (sec/us/ns)
   sender: string | null; // handle id (phone/email) if not from me
   has_attachments?: number | null;
+  error?: number | null;
   service?: string | null;
   account?: string | null;
   subject?: string | null;
@@ -259,6 +260,7 @@ type MessageColumnSupport = {
   hasAssociatedMessageType: boolean;
   hasAssociatedMessageGuid: boolean;
   hasAttributedBody: boolean;
+  hasError: boolean;
   hasBalloonBundleId: boolean;
   hasExpressiveSendStyleId: boolean;
   hasItemType: boolean;
@@ -281,6 +283,7 @@ async function getMessageColumnSupport(dbPath: string): Promise<MessageColumnSup
     hasAssociatedMessageType: names.has("associated_message_type"),
     hasAssociatedMessageGuid: names.has("associated_message_guid"),
     hasAttributedBody: names.has("attributedBody"),
+    hasError: names.has("error"),
     hasBalloonBundleId: names.has("balloon_bundle_id"),
     hasExpressiveSendStyleId: names.has("expressive_send_style_id"),
     hasItemType: names.has("item_type"),
@@ -441,6 +444,7 @@ async function buildMessageSelect(dbPath: string, options: MessageSelectOptions 
     "m.cache_has_attachments AS has_attachments",
     "m.date AS date",
   ];
+  if (support.hasError) parts.push("m.error AS error");
   if (support.hasService) parts.push("m.service AS service");
   if (support.hasAccount) parts.push("m.account AS account");
   if (support.hasSubject) parts.push("m.subject AS subject");
