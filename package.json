@@ -17,6 +17,7 @@
     "doctor": "node scripts/doctor.mjs",
     "doctor:json": "node scripts/doctor.mjs --json",
     "inspector": "pnpm dlx @modelcontextprotocol/inspector node dist/index.js",
+    "generate:wrappers": "node --loader ts-node/esm scripts/generate-mcp-wrappers.ts",
     "prepare": "pnpm run build"
   },
   "keywords": [

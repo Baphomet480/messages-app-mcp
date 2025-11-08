@@ -14,5 +14,14 @@
     "autoOpen": true,
     "pollIntervalMs": 2000,
     "port": 3337
+  },
+  "codeExecWrappers": {
+    "outputDir": "src/agents/messages/generated",
+    "serverCommand": "node",
+    "serverArgs": ["dist/index.js", "--stdio"],
+    "env": {
+      "MESSAGES_MCP_LOG_VIEWER": "0",
+      "MESSAGES_MCP_LOG_VIEWER_AUTO_OPEN": "0"
+    }
   }
 }

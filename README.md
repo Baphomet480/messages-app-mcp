@@ -300,6 +300,7 @@ Exit codes: `0` OK, `1` degraded, `2` down. The remote manifest probe requires `
 - `pnpm run dev` starts the stdio server via ts-node.
 - `pnpm run build` compiles TypeScript to `dist/`; run `pnpm start` to execute the compiled build.
 - An MCP Inspector session can be launched with `pnpm run inspector`.
+- `pnpm run generate:wrappers` spawns the stdio server, enumerates all MCP tools, and regenerates the code-execution wrappers under `src/agents/messages/`.
 - `node scripts/check-tools.mjs` performs the automated metadata audit used in CI to keep tool titles and field descriptions aligned with MCP best practices.
 - `node scripts/test-search.mjs --participant '+15551234567' --days-back 30` exercises the recency/search flow exactly as an MCP client would.
 - Scripts are documented in `package.json`; use `pnpm run send` or `pnpm run doctor` for quick manual checks.
@@ -474,3 +475,6 @@ pnpm dlx messages-mcp
 ```
 
 For HTTP transport, launch `node dist/index.js --http --port 3333 --cors-origin https://chat.openai.com` and point the client at the resulting base URL.
+### Code-execution wrappers
+
+`scripts/generate-mcp-wrappers.ts` produces lightweight helper modules for every MCP tool plus an index that exports `messageTools` and a lookup map. Agents running in “code execution” mode (Codex CLI, Claude desktop, etc.) can import these modules instead of ingesting the raw `tools/list` payload, which keeps prompts tiny while preserving full type info. The generator respects overrides from `messages-mcp.config.json` (see `codeExecWrappers`), so you can point it at an HTTP transport or change the destination directory if you keep wrappers in a separate workspace.

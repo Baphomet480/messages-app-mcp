@@ -8,6 +8,13 @@ const ENV_CONFIG_PATH = "MESSAGES_MCP_CONFIG";
 
 export type TransportMode = "stdio" | "http";
 
+export type CodeExecWrappersConfig = {
+  outputDir?: string;
+  serverCommand?: string;
+  serverArgs?: string[];
+  env?: Record<string, string>;
+};
+
 export type MessagesConfig = {
   transport: TransportMode;
   http?: {
@@ -24,6 +31,7 @@ export type MessagesConfig = {
     pollIntervalMs?: number;
     port?: number;
   };
+  codeExecWrappers?: CodeExecWrappersConfig;
 };
 
 const defaultConfig: MessagesConfig = {
@@ -33,6 +41,14 @@ const defaultConfig: MessagesConfig = {
     autoOpen: true,
     pollIntervalMs: undefined,
     port: undefined,
+  },
+  codeExecWrappers: {
+    outputDir: "src/agents/messages/generated",
+    serverArgs: ["dist/index.js", "--stdio"],
+    env: {
+      MESSAGES_MCP_LOG_VIEWER: "0",
+      MESSAGES_MCP_LOG_VIEWER_AUTO_OPEN: "0",
+    },
   },
 };
 
@@ -76,6 +92,10 @@ function mergeConfigs(base: MessagesConfig, override: Partial<MessagesConfig> | 
     logViewer: {
       ...base.logViewer,
       ...override.logViewer,
+    },
+    codeExecWrappers: {
+      ...base.codeExecWrappers,
+      ...override.codeExecWrappers,
     },
   } satisfies MessagesConfig;
 }
