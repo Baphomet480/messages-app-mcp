@@ -46,7 +46,7 @@
     "scripts/applescript"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.20.2",
+    "@modelcontextprotocol/sdk": "^1.22.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "imessage-parser": "^0.1.0",
